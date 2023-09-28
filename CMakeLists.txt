@@ -9,8 +9,16 @@ set(SOURCES src/main.cpp
 			      src/System.cpp
             src/memory/Bus.cpp
             src/arm/armgeneric.cpp
+            src/arm/thumbgeneric.cpp
             src/arm/arm11.cpp
-            src/arm/cp15.cpp)
+            src/arm/arm9.cpp
+            src/arm/cp15.cpp
+            src/arm/mpcore_pmr.cpp
+            src/dma/cdma.cpp
+            src/dma/ndma.cpp
+            src/i2c/i2c.cpp
+            src/pxi/pxi.cpp
+            src/timers/arm9_timers.cpp)
 
 set(CMAKE_BUILD_TYPE Debug)
 

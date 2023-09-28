@@ -3,14 +3,7 @@
 #include <string>
 #include <algorithm>
 #include <cassert>
-
-template<typename T>
-T sign_extend(T x, int bits)
-{
-    T m = 1;
-    m <<= bits - 1;
-    return (x ^ m) - m;
-}
+#include <bitset>
 
 std::string HexToString(uint32_t num)
 {
@@ -25,22 +18,6 @@ std::string HexToString(uint32_t num)
     return ret;
 }
 
-bool CalcOverflowSub(uint32_t a, uint32_t b, uint32_t result)
-{
-    bool sA = (a >> 31) & 1;
-    bool sB = (b >> 31) & 1;
-    bool sR = (result >> 31) & 1;
-    return sA != sB && sB == sR;
-}
-
-bool CalcOverflowAdd(uint32_t a, uint32_t b, uint32_t result)
-{
-    bool sA = (a >> 31) & 1;
-    bool sB = (b >> 31) & 1;
-    bool sR = (result >> 31) & 1;
-    return sA == sB && sB != sR;
-}
-
 void ARMCore::FillPipeline()
 {
     pipeline[0] = Read32(*(registers[15]));
@@ -49,11 +26,27 @@ void ARMCore::FillPipeline()
     *(registers[15]) += 4;
 }
 
+void ARMCore::FillPipelineThumb()
+{
+    t_pipeline[0] = Read16(*(registers[15]));
+    *(registers[15]) += 2;
+    t_pipeline[1] = Read16(*(registers[15]));
+    *(registers[15]) += 2;
+}
+
 uint32_t ARMCore::AdvancePipeline()
 {
     uint32_t data = pipeline[0];
     pipeline[0] = pipeline[1];
     pipeline[1] = Read32(*(registers[15]));
+    return data;
+}
+
+uint16_t ARMCore::AdvancePipelineThumb()
+{
+    uint16_t data = t_pipeline[0];
+    t_pipeline[0] = t_pipeline[1];
+    t_pipeline[1] = Read16(*(registers[15]));
     return data;
 }
 
@@ -67,6 +60,18 @@ void ARMCore::SwitchMode(uint8_t mode)
         registers[13] = &regs_svc[0];
         registers[14] = &regs_svc[1];
         cur_spsr = &spsr_svc;
+        break;
+    case MODE_IRQ:
+        for (int i = 0; i < 16; i++)
+            registers[i] = &regs[i];
+        registers[13] = &regs_irq[0];
+        registers[14] = &regs_irq[1];
+        cur_spsr = &spsr_irq;
+        break;
+    case MODE_SYSTEM_USER:
+        for (int i = 0; i < 16; i++)
+            registers[i] = &regs[i];
+        cur_spsr = nullptr;
         break;
     default:
         printf("ERROR: Switch to unknown mode 0x%x\n", mode);
@@ -82,6 +87,22 @@ bool CondPassed(CPSR& cpsr, uint8_t cond)
         return cpsr.z;
     case 0b0001:
         return !cpsr.z;
+    case 0b0010:
+        return cpsr.c;
+    case 0b0011:
+        return !cpsr.c;
+    case 0b0100:
+        return cpsr.n;
+    case 0b0101:
+        return !cpsr.n;
+    case 0b1000:
+        return cpsr.c && !cpsr.z;
+    case 0b1001:
+        return !cpsr.c || cpsr.z;
+    case 0b1011:
+        return cpsr.v != cpsr.n;
+    case 0b1101:
+        return cpsr.z || cpsr.v != cpsr.n;
     case 0b1110:
         return true;
     default:
@@ -90,14 +111,42 @@ bool CondPassed(CPSR& cpsr, uint8_t cond)
     }
 }
 
+bool IsBranchExchange(uint32_t instr)
+{
+    return ((instr >> 4) & 0xFFFFFF) == 0x12FFF1;
+}
+
+bool IsBlockDataTransfer(uint32_t instr)
+{
+    return ((instr >> 25) & 0x7) == 4;
+}
+
 bool IsBranch(uint32_t instr)
 {
-    return ((instr >> 24) & 0xF) == 0xA;
+    return ((instr >> 25) & 0x7) == 0x5;
 }
 
 bool IsSingleDataTransfer(uint32_t instr)
 {
     return ((instr >> 26) & 0x3) == 1;
+}
+
+bool IsPSRTransferMSR(uint32_t instr)
+{
+    return ((instr >> 26) & 0x3) == 0
+            && ((instr >> 23) & 0x3) == 2
+            && ((instr >> 21) & 1) == 1
+            && ((instr >> 12) & 0xF) == 0xF
+            && ((instr >> 20) & 1) == 0;
+}
+
+bool IsPSRTransferMRS(uint32_t instr)
+{
+    return ((instr >> 26) & 0x3) == 0
+            && ((instr >> 23) & 0x3) == 2
+            && ((instr >> 21) & 1) == 0
+            && ((instr >> 16) & 0xF) == 0xF
+            && ((instr >> 20) & 1) == 0;
 }
 
 bool IsDataProcessing(uint32_t instr)
@@ -112,15 +161,245 @@ bool IsMRC(uint32_t instr)
             && ((instr >> 4) & 1) == 1;
 }
 
+bool IsMCR(uint32_t instr)
+{
+    return ((instr >> 24) & 0xF) == 0xE
+            && ((instr >> 20) & 1) == 0
+            && ((instr >> 4) & 1) == 1;
+}
+
+bool IsBlxOffset(uint32_t instr)
+{
+    return ((instr >> 25) & 0x7) == 0x5;
+}
+
+bool IsUMULL(uint32_t instr)
+{
+    return ((instr >> 21) & 0x7F) == 0x4
+            && ((instr >> 4) & 0xF) == 0x9;
+}
+
+bool IsMLA(uint32_t instr)
+{
+    return ((instr >> 21) & 0x7F) == 0x1
+            && ((instr >> 4) & 0xF) == 0x9;
+}
+
+bool IsCLZ(uint32_t instr)
+{
+    return ((instr >> 16) & 0xFFF) == 0x16F;
+}
+
+bool IsWFI(uint32_t instr)
+{
+    return (instr & 0xFFFFFFF) == 0x320F003;
+}
+
+void ARMGeneric::BranchExchange(ARMCore *core, uint32_t instr)
+{
+    uint8_t rn = instr & 0xf;
+
+    core->cpsr.t = *(core->registers[rn]) & 1;
+    *(core->registers[15]) = *(core->registers[rn]) & ~1;
+    core->didBranch = true;
+
+    if (core->CanDisassemble)
+        printf("bx r%d\n", rn);
+}
+
+void ARMGeneric::BlockDataTransfer(ARMCore *core, uint32_t instr)
+{
+    bool p = (instr >> 24) & 1;
+    bool u = (instr >> 23) & 1;
+    bool s = (instr >> 22) & 1;
+    bool w = (instr >> 21) & 1;
+    bool l = (instr >> 20) & 1;
+
+    uint8_t rn = (instr >> 16) & 0xF;
+
+    uint16_t reglist = instr & 0xFFFF;
+
+    uint32_t addr = *(core->registers[rn]);
+
+    if (core->CanDisassemble)
+    {
+        if (rn == 13)
+        {
+            switch ((l << 2) | (p << 1) | u)
+            {
+            case 0: printf("stmed "); break;
+            case 1: printf("stmea "); break;
+            case 2: printf("stmfd "); break;
+            case 3: printf("stmfa "); break;
+            case 4: printf("ldmfa "); break;
+            case 5: printf("ldmfd "); break;
+            case 6: printf("ldmea "); break;
+            case 7: printf("ldmed "); break;
+            }
+        }
+        else
+        {
+            switch ((l << 2) | (p << 1) | u)
+            {
+            case 0: printf("stmda "); break;
+            case 1: printf("stmia "); break;
+            case 2: printf("stmdb "); break;
+            case 3: printf("stmib "); break;
+            case 4: printf("ldmda "); break;
+            case 5: printf("ldmia "); break;
+            case 6: printf("ldmdb "); break;
+            case 7: printf("ldmib "); break;
+            }
+        }
+
+        printf("r%d%s, ", rn, w ? "!" : "");
+
+        int count = std::bitset<16>(reglist).count();
+
+        bool print_comma = true;
+        int num_printed = 0;
+        printf("{");
+        for (int i = 0; i < 16; i++)
+            if (reglist & (1 << i))
+            {
+                if (num_printed == (count-1))
+                    print_comma = false;
+                printf("r%d%s", i, print_comma ? ", " : "");
+                num_printed++;
+            }
+
+        printf("}\n");
+    }
+
+    assert(!s);
+    
+    int offset;
+    if (u)
+        offset = 4;
+    else
+        offset = -4;
+    
+    if (l)
+    {
+        int regs = 0;
+        if (u)
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                int bit = 1 << i;
+                if (reglist & bit)
+                {
+                    regs++;
+                    if (p)
+                    {
+                        addr += offset;
+                        *(core->registers[i]) = core->Read32(addr);
+                    }
+                    else
+                    {
+                        *(core->registers[i]) = core->Read32(addr);
+                        addr += offset;
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (int i = 15; i >= 0; i--)
+            {
+                int bit = 1 << i;
+                if (reglist & bit)
+                {
+                    regs++;
+                    if (p)
+                    {
+                        addr += offset;
+                        *(core->registers[i]) = core->Read32(addr);
+                    }
+                    else
+                    {
+                        *(core->registers[i]) = core->Read32(addr);
+                        addr += offset;
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        int regs = 0;
+        if (u)
+        {
+            for (int i = 0; i < 16; i++)
+            {
+                int bit = 1 << i;
+                if (reglist & bit)
+                {
+                    regs++;
+                    if (p)
+                    {
+                        addr += offset;
+                        core->Write32(addr, *(core->registers[i]));
+                    }
+                    else
+                    {
+                        core->Write32(addr, *(core->registers[i]));
+                        addr += offset;
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (int i = 15; i >= 0; i--)
+            {
+                int bit = 1 << i;
+                if (reglist & bit)
+                {
+                    regs++;
+                    if (p)
+                    {
+                        addr += offset;
+                        core->Write32(addr, *(core->registers[i]));
+                    }
+                    else
+                    {
+                        core->Write32(addr, *(core->registers[i]));
+                        addr += offset;
+                    }
+                }
+            }
+        }
+    }
+
+    if (w)
+        *(core->registers[rn]) = addr;
+
+    
+    if ((reglist & (1 << 15)) && l)
+    {
+        if (*(core->registers[15]) & 1)
+        {
+            core->cpsr.t = 1;
+            *(core->registers[15]) &= ~1;
+        }
+        core->didBranch = true;
+    }
+}
+
 void ARMGeneric::Branch(ARMCore *core, uint32_t instr)
 {
+    bool l = (instr >> 24) & 1;
     int32_t imm = sign_extend<int32_t>((instr & 0xFFFFFF) << 2, 26);
+
+    if (l)
+        *(core->registers[14]) = *(core->registers[15]) - 4;
 
     *(core->registers[15]) += imm;
     core->didBranch = true;
 
     if (core->CanDisassemble)
-        printf("b 0x%08x\n", *(core->registers[15]));
+        printf("b%s 0x%08x\n", l ? "l" : "", *(core->registers[15]));
 }
 
 void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
@@ -144,8 +423,18 @@ void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
         uint8_t type = (instr >> 5) & 0x3;
         uint8_t rm = instr & 0xF;
 
+        op2 = *(core->registers[rm]);
+        op2_disasm = "r" + std::to_string(rm);
+
         switch (type)
         {
+        case 0:
+            if (!is)
+                break;
+            core->cpsr.c = (op2 >> (is-1)) & 1;
+            op2 <<= is;
+            op2_disasm += ", #" + std::to_string(is);
+            break;
         default:
             printf("Unknown shift type %d\n", type);
             exit(1);
@@ -172,14 +461,19 @@ void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
         }
         else
         {
-            printf("TODO: ldrb\n");
-            exit(1);
+            *(core->registers[rd]) = core->Read8(addr);
         }
     }
     else
     {
-        printf("TODO: Store\n");
-        exit(1);
+        if (!b)
+        {
+            core->Write32(addr & ~3, *(core->registers[rd]));
+        }
+        else
+        {
+            core->Write8(addr, *(core->registers[rd]));
+        }
     }
 
     if (!p)
@@ -188,8 +482,110 @@ void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
     if (!p || w)
         *(core->registers[rn]) = addr;
     
+    if (rd == 15 && l)
+    {
+        if (*(core->registers[15]) & 1)
+        {
+            core->cpsr.t = *(core->registers[15]) & 1;
+            *(core->registers[15]) &= ~1;
+        }
+
+        core->didBranch = true;
+    }
+    
     if (core->CanDisassemble)
         printf("%s%s r%d, [r%d, %s]\n", l ? "ldr" : "str", b ? "b" : "", rd, rn, op2_disasm.c_str());
+}
+
+void ARMGeneric::PsrTransferMRS(ARMCore *core, uint32_t instr)
+{
+    bool i = (instr >> 25) & 1;
+    bool psr = (instr >> 22) & 1;
+    uint8_t rd = (instr >> 12) & 0xF;
+
+    if (psr)
+        *(core->registers[rd]) = core->cur_spsr->value;
+    else
+        *(core->registers[rd]) = core->cpsr.value;
+    
+    if (core->CanDisassemble)
+        printf("mrs r%d, %s_fsxc\n", rd, psr ? "spsr" : "cpsr");
+}
+
+void ARMGeneric::PsrTransferMSR(ARMCore *core, uint32_t instr)
+{
+    bool i = (instr >> 25) & 1;
+    bool f = (instr >> 19) & 1;
+    bool s = (instr >> 18) & 1;
+    bool x = (instr >> 17) & 1;
+    bool c = (instr >> 16) & 1;
+    bool psr = (instr >> 22) & 1;
+    assert(!psr);
+
+    uint32_t operand2;
+    std::string op2_disasm;
+
+    if (i)
+    {
+        uint8_t shamt = (instr >> 8) & 0xF;
+        uint8_t imm = instr & 0xFF;
+        imm <<= 1;
+
+        operand2 = std::rotr<uint32_t>(imm, shamt);
+        op2_disasm = "#" + std::to_string(imm);
+        if (shamt)
+            op2_disasm += ", #" + std::to_string(shamt);
+    }
+    else
+    {
+        uint8_t rm = instr & 0xF;
+        operand2 = *(core->registers[rm]);
+        op2_disasm = "r" + std::to_string(rm);
+    }
+
+    uint32_t mask = 0;
+    if (f)
+        mask |= 0xFF000000;
+    if (s)
+        mask |= 0xFF0000;
+    if (x)
+        mask |= 0xFF00;
+    if (c)
+        mask |= 0xFF;
+    
+    if (core->cpsr.mode == MODE_SYSTEM_USER)
+        mask &= 0xFFFFFF00;
+    if (!psr)
+        mask &= 0xFFFFFFDF;
+    
+    operand2 &= mask;
+
+    core->cpsr.value = (core->cpsr.value & ~mask) | operand2;
+
+    if (core->CanDisassemble)
+    {
+        if (!f && !s && !x && !c)
+        {
+            printf("nop {0}\n");
+        }
+        else
+        {
+            printf("msr cpsr_");
+            if (f && !s && !x && !c)
+                printf("flg");
+            else if (f)
+                printf("f");
+            if (s)
+                printf("s");
+            if (x)
+                printf("x");
+            if (c)
+                printf("c");
+            printf(", %s\n", op2_disasm.c_str());
+        }
+    }
+
+    core->SwitchMode(core->cpsr.mode);
 }
 
 void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
@@ -207,6 +603,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
     {
         uint32_t imm = instr & 0xff;
         uint8_t shamt = (instr >> 8) & 0xF;
+        shamt <<= 1;
 
         operand2 = std::rotr(imm, shamt);
 
@@ -220,8 +617,57 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
 
         if (r)
         {
-            printf("TODO: Shift-by-register\n");
-            exit(1);
+            uint8_t rs = (instr >> 8) & 0xF;
+            uint8_t rm = instr & 0xF;
+            operand2 = *(core->registers[rm]);
+
+            uint8_t shamt = *(core->registers[rs]) & 0xFF;
+            uint8_t shtype = (instr >> 5) & 0x3;
+
+            op2_disasm = "r" + std::to_string(rm);
+            if (shamt)
+            {
+                switch (shtype)
+                {
+                case 0:
+                {
+                    core->cpsr.c = (operand2 >> (32-shamt)) & 1;
+                    operand2 <<= shamt;
+                    op2_disasm += ", lsl r" + std::to_string(rs);
+                    break;
+                }
+                case 1:
+                {
+                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    operand2 >>= shamt;
+                    op2_disasm += ", lsr r" + std::to_string(rs);
+                    break;
+                }
+                case 2:
+                {
+                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    int32_t tmp = operand2;
+                    tmp >>= shamt;
+                    operand2 = tmp;
+                    op2_disasm += ", asr r" + std::to_string(rs);
+                    break;
+                }
+                default:
+                    printf("Unknown shift type %d with shamt != 0\n", shtype);
+                    exit(1);
+                }
+            }
+            else
+            {
+                switch (shtype)
+                {
+                case 0:
+                    break;
+                default:
+                    printf("Unknown shift type %d with shamt=0\n", shtype);
+                    exit(1);
+                }
+            }
         }
         else
         {
@@ -234,8 +680,35 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
             op2_disasm = "r" + std::to_string(rm);
             if (shamt)
             {
-                printf("TODO: Non-special case shifting\n");
-                exit(1);
+                switch (shtype)
+                {
+                case 0:
+                {
+                    core->cpsr.c = (operand2 >> (32-shamt)) & 1;
+                    operand2 <<= shamt;
+                    op2_disasm += ", lsl #" + std::to_string(shamt);
+                    break;
+                }
+                case 1:
+                {
+                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    operand2 >>= shamt;
+                    op2_disasm += ", lsr #" + std::to_string(shamt);
+                    break;
+                }
+                case 2:
+                {
+                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    int32_t tmp = operand2;
+                    tmp >>= shamt;
+                    operand2 = tmp;
+                    op2_disasm += ", asr #" + std::to_string(shamt);
+                    break;
+                }
+                default:
+                    printf("Unknown shift type %d with shamt != 0\n", shtype);
+                    exit(1);
+                }
             }
             else
             {
@@ -253,14 +726,143 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
 
     switch (opcode)
     {
+    case 0x00:
+    {
+        uint32_t result = *(core->registers[rn]) & operand2;
+
+
+        if (s)
+        {
+            core->cpsr.z = (result == 0);
+            core->cpsr.n = (result >> 31) & 1;
+        }
+
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("and%s r%d,r%d,%s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+
+        break;
+    }
+    case 0x02:
+    {
+        uint32_t result = *(core->registers[rn]) - operand2;
+
+        if (s)
+        {
+            UpdateFlagsSub(core, *(core->registers[rn]), operand2, result);
+        }
+        
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("sub%s r%d, r%d, %s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+        break;
+    }
+    case 0x03:
+    {
+        uint32_t result = operand2 - *(core->registers[rn]);
+
+        if (s)
+        {
+            UpdateFlagsSub(core, operand2, *(core->registers[rn]), result);
+        }
+        
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("rsb%s r%d, %s\n", s ? "s" : "", rn, op2_disasm.c_str());
+        break;
+    }
+    case 0x04:
+    {
+        uint32_t result = *(core->registers[rn]) + operand2;
+
+        if (s)
+        {
+            core->cpsr.n = (result >> 31) & 1;
+            core->cpsr.v = CalcOverflowAdd(*(core->registers[rn]), operand2, result);
+            core->cpsr.c = (result < *(core->registers[rn]));
+            core->cpsr.z = (result == 0);
+        }
+
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("add r%d, r%d, %s\n", rd, rn, op2_disasm.c_str());
+        break;
+    }
+    case 0x5:
+    {
+        uint32_t result = *(core->registers[rn]) + operand2 + core->cpsr.c;
+        
+        if (s)
+        {
+            core->cpsr.z = (result == 0);
+            core->cpsr.n = (result >> 31) & 1;
+            uint32_t temp = *(core->registers[rn]) + operand2;
+            uint32_t res = temp + core->cpsr.c;
+            core->cpsr.v = CalcOverflowAdd(*(core->registers[rn]), operand2, temp) | CalcOverflowAdd(temp, core->cpsr.c, result);
+            core->cpsr.c = ((0xFFFFFFFF-*(core->registers[rn])) < operand2) | ((0xFFFFFFFF-temp) < core->cpsr.c);
+        }
+
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("adc%s r%d, r%d, %s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+        break;
+    }
+    case 0x6:
+    {
+        uint32_t result = *(core->registers[rd]) - operand2 - !core->cpsr.c;
+        
+        if (s)
+        {
+            UpdateFlagsSbc(core, *(core->registers[rd]), operand2, result);
+        }
+
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("sbc%s r%d, r%d, %s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+        break;
+    }
+    case 0x07:
+    {
+        uint32_t result = operand2 - *(core->registers[rn]) + core->cpsr.c - 1;
+
+        if (s)
+        {
+            UpdateFlagsSbc(core, operand2, *(core->registers[rd]), result);
+        }
+        
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("rsbc%s r%d, %s\n", s ? "s" : "", rn, op2_disasm.c_str());
+        break;
+    }
+    case 0x08:
+    {
+        uint32_t result = *(core->registers[rn]) & operand2;
+
+        assert(s);
+
+        core->cpsr.z = (result == 0);
+        core->cpsr.n = (result >> 31) & 1;
+
+        if (core->CanDisassemble)
+            printf("tst r%d,r%d,%s\n", rd, rn, op2_disasm.c_str());
+
+        break;
+    }
     case 0x0a:
     {
         uint32_t result = *(core->registers[rn]) - operand2;
 
-        core->cpsr.n = (result >> 31) & 1;
-        core->cpsr.v = CalcOverflowSub(*(core->registers[rn]), operand2, result);
-        core->cpsr.c = !(operand2 > *(core->registers[rn]));
-        core->cpsr.z = (result == 0);
+        assert(s);
+
+        UpdateFlagsSub(core, *(core->registers[rn]), operand2, result);
 
         if (core->CanDisassemble)
             printf("cmp r%d, %s\n", rn, op2_disasm.c_str());
@@ -269,6 +871,8 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
     case 0x0b:
     {
         uint32_t result = *(core->registers[rn]) + operand2;
+
+        assert(s);
 
         core->cpsr.n = (result >> 31) & 1;
         core->cpsr.v = CalcOverflowAdd(*(core->registers[rn]), operand2, result);
@@ -297,6 +901,52 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
 
         break;
     }
+    case 0x0d:
+    {
+        if (s)
+        {
+            core->cpsr.z = (operand2 == 0);
+            core->cpsr.n = (operand2 >> 31) & 1;
+        }
+
+        *(core->registers[rd]) = operand2;
+
+        if (core->CanDisassemble)
+            printf("mov%s r%d,%s\n", s ? "s" : "", rd, op2_disasm.c_str());
+        break;
+    }
+    case 0x0e:
+    {
+        uint32_t result = *(core->registers[rn]) & ~operand2;
+
+
+        if (s)
+        {
+            core->cpsr.z = (result == 0);
+            core->cpsr.n = (result >> 31) & 1;
+        }
+
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("bic%s r%d,r%d,%s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+
+        break;
+    }
+    case 0x0f:
+    {
+        if (s)
+        {
+            core->cpsr.z = ((~operand2) == 0);
+            core->cpsr.n = ((~operand2) >> 31) & 1;
+        }
+
+        *(core->registers[rd]) = ~operand2;
+
+        if (core->CanDisassemble)
+            printf("mvn%s r%d,%s\n", s ? "s" : "", rd, op2_disasm.c_str());
+        break;
+    }
     default:
         printf("Unknown data processing opcode 0x%02x\n", opcode);
         exit(1);
@@ -322,17 +972,153 @@ void ARMGeneric::MoveFromCP(ARMCore *core, uint32_t instr)
         printf("mrc %d, %d, r%d, C%d, C%d, {%d}\n", pn, cpopc, rd, cn, cm, cp);
 }
 
+void ARMGeneric::MoveToCP(ARMCore *core, uint32_t instr)
+{
+    uint8_t cpopc = (instr >> 21) & 0x7;
+    uint8_t cn = (instr >> 16) & 0xF;
+    uint8_t rd = (instr >> 12) & 0xF;
+    uint8_t pn = (instr >> 8) & 0xF;
+    assert(pn == 15);
+    uint8_t cp = (instr >> 5) & 0x7;
+    uint8_t cm = instr & 0xF;
+
+    core->cp15->WriteRegister(cpopc, cn, cm, cp, *(core->registers[rd]));
+
+    if (core->CanDisassemble)
+        printf("mcr %d, %d, r%d, C%d, C%d, {%d}\n", pn, cpopc, rd, cn, cm, cp);
+}
+
+void ARMGeneric::BlxOffset(ARMCore *core, uint32_t instr)
+{
+    int32_t offs = sign_extend<int32_t>((instr & 0xFFFFFF) << 2, 26);
+    bool h = (instr >> 24) & 1;
+
+    *(core->registers[14]) = (*(core->registers[15]) - 4) & ~1;
+    *(core->registers[15]) += offs + h*2;
+    core->didBranch = true;
+    core->cpsr.t = true;
+
+    if (core->CanDisassemble)
+        printf("blx 0x%08x\n", *(core->registers[15]));
+}
+
+void ARMGeneric::Umull(ARMCore *core, uint32_t instr)
+{
+    bool s = (instr >> 20) & 1;
+    uint8_t rdHi = (instr >> 16) & 0xF;
+    uint8_t rdLo = (instr >> 12) & 0xF;
+    uint8_t rs = (instr >> 8) & 0xF;
+    uint8_t rm = instr & 0xf;
+
+    uint64_t result = *(core->registers[rm]) * *(core->registers[rs]);
+
+    if (s)
+    {
+        core->cpsr.z = (result == 0);
+        core->cpsr.n = (result >> 31) & 1;
+    }
+
+    *(core->registers[rdHi]) = (result >> 32);
+    *(core->registers[rdLo]) = (uint32_t)result;
+
+    if (core->CanDisassemble)
+        printf("umull%s r%d,r%d,r%d,r%d\n", s ? "s" : "", rdLo, rdHi, rm, rs);
+}
+
+void ARMGeneric::Mla(ARMCore *core, uint32_t instr)
+{
+    bool s = (instr >> 20) & 1;
+    uint8_t rd = (instr >> 16) & 0xF;
+    uint8_t rn = (instr >> 12) & 0xF;
+    uint8_t rs = (instr >> 8) & 0xF;
+    uint8_t rm = instr & 0xf;
+
+    uint32_t result = *(core->registers[rd]) * *(core->registers[rs]);
+    result += *(core->registers[rn]);
+
+    if (s)
+    {
+        core->cpsr.z = (result == 0);
+        core->cpsr.n = (result >> 31) & 1;
+    }
+
+    *(core->registers[rd]) = result;
+
+    if (core->CanDisassemble)
+        printf("mla%s r%d,r%d,r%d,r%d\n", s ? "s" : "", rd, rm, rs, rn);
+}
+
+void ARMGeneric::Clz(ARMCore *core, uint32_t instr)
+{
+    uint8_t rs = instr & 0xf;
+    uint8_t rd = (instr >> 12) & 0xF;
+
+    uint32_t source = *(core->registers[rs]);
+
+    uint32_t bits = 0;
+    while ((source & 0xFF000000) == 0)
+    {
+        bits += 8;
+        source <<= 8;
+        source |= 0xFF;
+    }
+
+    while ((source & 0x80000000) == 0)
+    {
+        bits++;
+        source <<= 1;
+        source |= 1;
+    }
+
+    *(core->registers[rd]) = bits;
+
+    if (core->CanDisassemble)
+        printf("clz r%d,r%d\n", rd, rs);
+}
+
+void ARMGeneric::Wfi(ARMCore *core, uint32_t instr)
+{
+    (void)instr;
+    core->halted = true;
+    if (core->CanDisassemble)
+        printf("wfi\n");
+}
+
 void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
 {
-    printf("[ARM%d]: ", core->id);
+    if (core->CanDisassemble)
+        printf("[ARM%d]: ", core->id);
+
+    if (((instr >> 28) & 0xF) == 0xF)
+    {
+        if (IsBlxOffset(instr))
+        {
+            BlxOffset(core, instr);
+            return;
+        }
+
+        printf("Unhandled extended ARM instruction 0x%08x\n", instr);
+        exit(1);
+    }
 
     if (!CondPassed(core->cpsr, (instr >> 28) & 0xF))
     {
-        printf("Cond failed\n");
+        if (core->CanDisassemble)
+            printf("Cond failed\n");
         return;
     }
 
-    if (IsBranch(instr))
+    if (IsBranchExchange(instr))
+    {
+        BranchExchange(core, instr);
+        return;
+    }
+    else if (IsBlockDataTransfer(instr))
+    {
+        BlockDataTransfer(core, instr);
+        return;
+    }
+    else if (IsBranch(instr))
     {
         Branch(core, instr);
         return;
@@ -340,6 +1126,36 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
     else if (IsSingleDataTransfer(instr))
     {
         SingleDataTransfer(core, instr);
+        return;
+    }
+    else if (IsWFI(instr))
+    {
+        Wfi(core, instr);
+        return;
+    }
+    else if (IsPSRTransferMSR(instr))
+    {
+        PsrTransferMSR(core, instr);
+        return;
+    }
+    else if (IsPSRTransferMRS(instr))
+    {
+        PsrTransferMRS(core, instr);
+        return;
+    }
+    else if (IsUMULL(instr))
+    {
+        Umull(core, instr);
+        return;
+    }
+    else if (IsMLA(instr))
+    {
+        Mla(core, instr);
+        return;
+    }
+    else if (IsCLZ(instr))
+    {
+        Clz(core, instr);
         return;
     }
     else if (IsDataProcessing(instr))
@@ -350,6 +1166,11 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
     else if (IsMRC(instr))
     {
         MoveFromCP(core, instr);
+        return;
+    }
+    else if (IsMCR(instr))
+    {
+        MoveToCP(core, instr);
         return;
     }
 

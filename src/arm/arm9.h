@@ -2,15 +2,11 @@
 
 #include <stdint.h>
 #include <arm/armgeneric.h>
-#include <arm/mpcore_pmr.h>
 
-class ARM11Core : public ARMCore
+class ARM9Core : public ARMCore
 {
-private:
-    int coreId = 0;
-    MPCore_PMR* pmr;
 public:
-    ARM11Core();
+    ARM9Core();
 
     void Reset();
     void Run();
