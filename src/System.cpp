@@ -3,7 +3,7 @@
 #include <arm/arm11.h>
 #include <arm/arm9.h>
 
-ARM11Core arm11cores[2];
+ARM11Core cores[4];
 ARM9Core arm9;
 
 void System::LoadBios(const char *bios9, const char *bios11)
@@ -14,8 +14,9 @@ void System::LoadBios(const char *bios9, const char *bios11)
 void System::Reset()
 {
     for (int i = 0; i < 2; i++)
-        arm11cores[i].Reset();
+        cores[i].Reset();
     arm9.Reset();
+    Bus::Reset();
 }
 
 int System::Run()
@@ -24,8 +25,8 @@ int System::Run()
     {
         for (int i = 0; i < 2; i++)
         {
-            arm11cores[0].Run();
-            arm11cores[1].Run();
+            cores[0].Run();
+            cores[1].Run();
         }
 
         arm9.Run();
@@ -38,8 +39,8 @@ int System::Run()
 
 void System::Dump()
 {
-    arm11cores[0].Dump();
-    arm11cores[1].Dump();
+    cores[0].Dump();
+    cores[1].Dump();
 
     arm9.Dump();
 

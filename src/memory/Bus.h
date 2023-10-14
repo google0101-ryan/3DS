@@ -10,7 +10,11 @@ namespace Bus
 void Initialize(std::string bios9Path, std::string bios11Path, bool isnew = false);
 void Dump();
 
+void Reset();
 void Run();
+
+bool GetInterruptPending9();
+void SetInterruptPending9(uint32_t interrupt);
 
 namespace ARM11
 {

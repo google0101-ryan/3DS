@@ -21,7 +21,7 @@ ARM11Core::ARM11Core()
 
 void ARM11Core::Reset()
 {
-    CanDisassemble = false;
+    CanDisassemble = true;
 
     memset(regs, 0, sizeof(regs));
     memset(regs_svc, 0, sizeof(regs_svc));
@@ -42,6 +42,18 @@ void ARM11Core::Reset()
 
 void ARM11Core::Run()
 {
+    if (pmr->InterruptPending())
+    {
+        printf("Unhalting\n");
+        halted = false;
+        if (!cpsr.i)
+        {
+            printf("[ARM11_%d]: Doing interrupt!\n", coreID+1);
+            DoInterrupt();
+            CanDisassemble = true;
+        }
+    }
+
     if (halted)
         return;
 
@@ -50,7 +62,7 @@ void ARM11Core::Run()
         didBranch = false;
 
         if (CanDisassemble)
-            printf("Core %d (t): ", coreId+1);
+            printf("Core %d (t): 0x%08x: ", coreId+1, *(registers[15]) - 4);
 
         uint16_t instr = AdvancePipelineThumb();
         ARMGeneric::DoTHUMBInstruction(this, instr);
@@ -60,7 +72,7 @@ void ARM11Core::Run()
         didBranch = false;
 
         if (CanDisassemble)
-            printf("Core %d: ", coreId+1);
+            printf("Core %d: 0x%08x: ", coreId+1, *(registers[15]) - 8);
 
         uint32_t instr = AdvancePipeline();
         ARMGeneric::DoARMInstruction(this, instr);

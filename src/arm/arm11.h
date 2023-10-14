@@ -8,8 +8,8 @@ class ARM11Core : public ARMCore
 {
 private:
     int coreId = 0;
-    MPCore_PMR* pmr;
 public:
+    MPCore_PMR* pmr;
     ARM11Core();
 
     void Reset();

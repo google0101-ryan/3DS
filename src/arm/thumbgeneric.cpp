@@ -161,6 +161,11 @@ void ARMGeneric::DoTHUMBInstruction(ARMCore* core, uint16_t instr)
         LongBranchExchange(core, instr);
         return;
     }
+    else if (IsThumbLDMSTM(instr))
+    {
+        ThumbLDMSTM(core, instr);
+        return;
+    }
     else if (IsLoadStoreImm(instr))
     {
         LoadStoreImmOffs(core, instr);
@@ -229,11 +234,6 @@ void ARMGeneric::DoTHUMBInstruction(ARMCore* core, uint16_t instr)
     else if (IsSPRelativeLoadStore(instr))
     {
         SPRelativeLoadStore(core, instr);
-        return;
-    }
-    else if (IsThumbLDMSTM(instr))
-    {
-        ThumbLDMSTM(core, instr);
         return;
     }
 
@@ -358,14 +358,14 @@ void ARMGeneric::LongBranchExchange(ARMCore *core, uint16_t instr)
     core->didBranch = true;
 
     if (core->CanDisassemble)
-        printf("blx 0x%08x\n", *(core->registers[15]));
+        printf("blx 0x%08x (0x%08x)\n", *(core->registers[15]), target_lr);
 }
 
 void ARMGeneric::LoadStoreImmOffs(ARMCore *core, uint16_t instr)
 {
     bool l = (instr >> 11) & 1;
     bool b = (instr >> 12) & 1;
-    uint8_t offset = (instr >> 6) & 0x1F;
+    uint32_t offset = (instr >> 6) & 0x1F;
     if (!b)
         offset <<= 2;
     
@@ -384,9 +384,11 @@ void ARMGeneric::LoadStoreImmOffs(ARMCore *core, uint16_t instr)
     else
     {
         if (b)
-            core->Write8(addr, *(core->registers[rd]));
+            core->Write8(addr, *(core->registers[rd]) & 0xFF);
         else
-            core->Write32(addr, *(core->registers[rd]));
+        {
+            core->Write32(addr & ~3, *(core->registers[rd]));
+        }
     }
 
     if (core->CanDisassemble)
@@ -463,7 +465,7 @@ void ARMGeneric::MovCmpAddSub(ARMCore *core, uint16_t instr)
         *(core->registers[rd]) = result;
 
         if (core->CanDisassemble)
-            printf("adds r%d, #%d\n", rd, imm);
+            printf("adds r%d, #%d (0x%08x)\n", rd, imm, result);
         break;
     }
     case 3:
@@ -498,6 +500,8 @@ void ARMGeneric::ConditionalBranch(ARMCore *core, uint16_t instr)
     {
         core->didBranch = true;
         *(core->registers[15]) += off;
+        if (*(core->registers[15]) == 0xffff3df8)
+            exit(1);
         if (core->CanDisassemble)
             printf("[TAKEN]");
     }
@@ -520,6 +524,16 @@ void ARMGeneric::HiRegisterOps(ARMCore *core, uint16_t instr)
 
     switch (opcode)
     {
+    case 1:
+    {
+        uint32_t result = *(core->registers[rd]) - *(core->registers[rs]);
+
+        UpdateFlagsSub(core, *(core->registers[rd]), *(core->registers[rs]), result);
+
+        if (core->CanDisassemble)
+            printf("cmp r%d, r%d (%d)\n", rd, rs, result);
+        break;
+    }
     case 2:
     {
         *(core->registers[rd]) = *(core->registers[rs]);
@@ -578,7 +592,7 @@ void ARMGeneric::DoAddSub(ARMCore *core, uint16_t instr)
         *(core->registers[rd]) = result;
 
         if (core->CanDisassemble)
-            printf("sub r%d, r%d, %s\n", rd, rs, op2_disasm.c_str());
+            printf("sub r%d, r%d, %s (%d)\n", rd, rs, op2_disasm.c_str(), result);
     }
     else
     {
@@ -615,7 +629,7 @@ void ARMGeneric::DoShift(ARMCore *core, uint16_t instr)
             
             *(core->registers[rd]) = result;
             if (core->CanDisassemble)
-                printf("movs r%d, r%d\n", rd, rs);
+                printf("movs r%d, r%d (0x%08x)\n", rd, rs, result);
             break;
         }
         default:
@@ -629,22 +643,24 @@ void ARMGeneric::DoShift(ARMCore *core, uint16_t instr)
         {
         case 0:
         {
+            assert(offs < 32);
             uint32_t result = *(core->registers[rs]) << offs;
             core->cpsr.z = (result == 0);
             core->cpsr.n = (result >> 31) & 1;
-            core->cpsr.c = (*(core->registers[rs]) >> (32-offs));
+            core->cpsr.c = (*(core->registers[rs]) >> (32-offs)) & 1;
             
             *(core->registers[rd]) = result;
             if (core->CanDisassemble)
-                printf("lsls r%d, r%d, #%d\n", rd, rs, offs);
+                printf("lsls r%d, r%d, #%d (0x%08x)\n", rd, rs, offs, result);
             break;
         }
         case 1:
         {
+            assert(offs < 32);
             uint32_t result = (*(core->registers[rs])) >> offs;
             core->cpsr.z = (result == 0);
             core->cpsr.n = (result >> 31) & 1;
-            core->cpsr.c = (*(core->registers[rs]) >> (offs-1));
+            core->cpsr.c = (*(core->registers[rs]) >> (offs-1)) & 1;
             
             *(core->registers[rd]) = result;
             if (core->CanDisassemble)
@@ -653,10 +669,11 @@ void ARMGeneric::DoShift(ARMCore *core, uint16_t instr)
         }
         case 2:
         {
+            assert(offs < 32);
             uint32_t result = ((int32_t)*(core->registers[rs])) >> offs;
             core->cpsr.z = (result == 0);
             core->cpsr.n = (result >> 31) & 1;
-            core->cpsr.c = (*(core->registers[rs]) >> (offs-1));
+            core->cpsr.c = (*(core->registers[rs]) >> (offs-1)) & 1;
             
             *(core->registers[rd]) = result;
             if (core->CanDisassemble)
@@ -720,22 +737,27 @@ void ARMGeneric::ALUOperations(ARMCore *core, uint16_t instr)
     }
     case 2:
     {
-        if ((*(core->registers[rs]) & 0xFF) != 0)
+        if ((*(core->registers[rs]) & 0xFF) >= 32)
         {
-            uint32_t result = *(core->registers[rs]) << (*(core->registers[rs]) & 0xFF);
+            *(core->registers[rd]) = 0;
+            core->cpsr.c = false;
+            core->cpsr.z = true;
+            core->cpsr.n = false;
+        }
+        else if ((*(core->registers[rs]) & 0xFF) != 0)
+        {
+            uint32_t result = *(core->registers[rd]) << (*(core->registers[rs]) & 0xFF);
             core->cpsr.z = (result == 0);
             core->cpsr.n = (result >> 31) & 1;
-            core->cpsr.c = (*(core->registers[rs]) >> (32-(*(core->registers[rs]) & 0xFF)));
+            core->cpsr.c = (*(core->registers[rd]) >> (32-(*(core->registers[rs]) & 0xFF))) & 1;
                 
             *(core->registers[rd]) = result;
         }
         else
         {
-            uint32_t result = *(core->registers[rs]);
+            uint32_t result = *(core->registers[rd]);
             core->cpsr.z = (result == 0);
             core->cpsr.n = (result >> 31) & 1;
-            
-            *(core->registers[rd]) = result;
         }
         if (core->CanDisassemble)
             printf("lsls r%d, r%d, r%d\n", rd, rs, rs);
@@ -743,12 +765,19 @@ void ARMGeneric::ALUOperations(ARMCore *core, uint16_t instr)
     }
     case 3:
     {
-        if ((*(core->registers[rs]) & 0xFF) != 0)
+        if ((*(core->registers[rs]) & 0xFF) >= 32)
         {
-            uint32_t result = *(core->registers[rs]) >> (*(core->registers[rs]) & 0xFF);
+            *(core->registers[rd]) = 0;
+            core->cpsr.c = false;
+            core->cpsr.z = true;
+            core->cpsr.n = false;
+        }
+        else if ((*(core->registers[rs]) & 0xFF) != 0)
+        {
+            uint32_t result = *(core->registers[rd]) >> (*(core->registers[rs]) & 0xFF);
             core->cpsr.z = (result == 0);
             core->cpsr.n = (result >> 31) & 1;
-            core->cpsr.c = (*(core->registers[rs]) >> ((*(core->registers[rs]) & 0xFF)-1));
+            core->cpsr.c = (*(core->registers[rd]) >> ((*(core->registers[rs]) & 0xFF)-1)) & 1;
                 
             *(core->registers[rd]) = result;
         }
@@ -757,7 +786,7 @@ void ARMGeneric::ALUOperations(ARMCore *core, uint16_t instr)
             assert(0);
         }
         if (core->CanDisassemble)
-            printf("lsrs r%d, r%d, r%d\n", rd, rs, rs);
+            printf("lsrs r%d, r%d, r%d\n", rd, rd, rs);
         break;
     }
     case 0x5:
@@ -789,14 +818,25 @@ void ARMGeneric::ALUOperations(ARMCore *core, uint16_t instr)
             printf("sbcs r%d, r%d\n", rd, rs);
         break;
     }
+    case 0x8:
+    {
+        uint32_t result = *(core->registers[rd]) & *(core->registers[rs]);
+        
+        core->cpsr.z = (result == 0);
+        core->cpsr.n = (result >> 31) & 1;
+        
+        if (core->CanDisassemble)
+            printf("tst r%d, r%d\n", rd, rs);
+        break;
+    }
     case 0xA:
     {
         uint32_t result = *(core->registers[rd]) - *(core->registers[rs]);
         
-        UpdateFlagsSub(core, *(core->registers[rs]), *(core->registers[rs]), result);
+        UpdateFlagsSub(core, *(core->registers[rd]), *(core->registers[rs]), result);
 
         if (core->CanDisassemble)
-            printf("cmp r%d, r%d\n", rd, rs);
+            printf("cmp r%d, r%d (0x%08x, 0x%08x)\n", rd, rs, *(core->registers[rd]), *(core->registers[rs]));
         break;
     }
     case 0xC:
@@ -859,7 +899,7 @@ void ARMGeneric::ALUOperations(ARMCore *core, uint16_t instr)
 
 void ARMGeneric::UnconditionalBranch(ARMCore *core, uint16_t instr)
 {
-    int32_t offs = sign_extend<int32_t>((instr & 0x3FF) << 1, 12);
+    int32_t offs = sign_extend<int32_t>((instr & 0x7FF) << 1, 12);
 
     *(core->registers[15]) += offs;
     core->didBranch = true;
@@ -878,7 +918,9 @@ void ARMGeneric::LoadStoreHalfword(ARMCore *core, uint16_t instr)
     uint32_t addr = *(core->registers[rb]) + offset;
 
     if (l)
+    {
         *(core->registers[rd]) = core->Read16(addr & ~1);
+    }
     else
         core->Write16(addr & ~1, *(core->registers[rd]));
     
@@ -890,7 +932,7 @@ void ARMGeneric::PCSPOffset(ARMCore *core, uint16_t instr)
 {
     bool source = (instr >> 11) & 1;
     uint8_t rd = (instr >> 8) & 0x7;
-    uint8_t offset = (instr & 0xFF) << 2;
+    uint32_t offset = (instr & 0xFF) << 2;
 
     uint32_t source_data;
     if (source)
@@ -961,7 +1003,9 @@ void ARMGeneric::SPRelativeLoadStore(ARMCore *core, uint16_t instr)
         core->Write32(addr, *(core->registers[rd]));
     
     if (core->CanDisassemble)
-        printf("%s r%d, [sp, #%d]\n", l ? "ldr" : "str", rd, offs);
+    {
+        printf("%s r%d, [sp, #%d] (0x%08x)\n", l ? "ldr" : "str", rd, offs, *(core->registers[rd]));
+    }
 }
 
 void ARMGeneric::ThumbLDMSTM(ARMCore *core, uint16_t instr)
@@ -978,7 +1022,7 @@ void ARMGeneric::ThumbLDMSTM(ARMCore *core, uint16_t instr)
         {
             if (rlist & (1 << i))
             {
-                *(core->registers[i]) = core->Read32(address);
+                *(core->registers[i]) = core->Read32(address & ~3);
                 address += 4;
             }
         }
@@ -989,7 +1033,7 @@ void ARMGeneric::ThumbLDMSTM(ARMCore *core, uint16_t instr)
         {
             if (rlist & (1 << i))
             {
-                *(core->registers[i]) = core->Read32(address);
+                core->Write32(address & ~3, *(core->registers[i]));
                 address += 4;
             }
         }
@@ -1021,7 +1065,7 @@ void ARMGeneric::ThumbLDMSTM(ARMCore *core, uint16_t instr)
 
 #define ADD_OVERFLOW(a, b, result) ((!(((a) ^ (b)) & 0x80000000)) && (((a) ^ (result)) & 0x80000000))
 #define SUB_OVERFLOW(a, b, result) (((a) ^ (b)) & 0x80000000) && (((a) ^ (result)) & 0x80000000)
-#define CARRY_SUB(a, b) (a >= b)
+#define CARRY_SUB(a, b) (a > b)
 
 void ARMGeneric::UpdateFlagsSub(ARMCore* core, uint32_t source, uint32_t operand2, uint32_t result)
 {
@@ -1029,7 +1073,7 @@ void ARMGeneric::UpdateFlagsSub(ARMCore* core, uint32_t source, uint32_t operand
 
     core->cpsr.n = (result >> 31) & 1;
     core->cpsr.z = (result == 0);
-    core->cpsr.c = operand2 >= source;
+    core->cpsr.c = !(operand2 > source);
     core->cpsr.v = SUB_OVERFLOW(source, operand2, result);
 }
 
@@ -1039,6 +1083,6 @@ void ARMGeneric::UpdateFlagsSbc(ARMCore *core, uint32_t source, uint32_t operand
     UpdateFlagsSub(core, source, operand2+borrow, result);
     uint32_t temp = source - operand2;
     uint32_t res = temp - borrow;
-    core->cpsr.c = CARRY_SUB(source, operand2) & CARRY_SUB(temp, borrow);
+    core->cpsr.c = !(CARRY_SUB(source, operand2) & CARRY_SUB(temp, borrow));
     core->cpsr.v = SUB_OVERFLOW(source, operand2, temp) | SUB_OVERFLOW(temp, borrow, res);
 }

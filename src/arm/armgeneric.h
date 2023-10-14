@@ -33,9 +33,10 @@ inline bool CalcOverflowAdd(uint32_t a, uint32_t b, uint32_t result)
 
 enum ArmModes
 {
+    MODE_USER = 0x10,
     MODE_IRQ = 0x12,
     MODE_SUPERVISOR = 0x13,
-    MODE_SYSTEM_USER = 0x1F
+    MODE_SYSTEM = 0x1F
 };
 
 union CPSR
@@ -84,6 +85,21 @@ protected:
 
     uint32_t pipeline[2];
     uint16_t t_pipeline[2];
+
+    void SetCPSR(uint32_t value)
+    {
+        cpsr.n = (value >> 31) & 1;
+        cpsr.z = (value >> 30) & 1;
+        cpsr.z = (value >> 29) & 1;
+        cpsr.z = (value >> 28) & 1;
+        cpsr.z = (value >> 27) & 1;
+
+        cpsr.i = (value >> 7) & 1;
+        cpsr.f = (value >> 6) & 1;
+        cpsr.t = (value >> 5) & 1;
+
+        cpsr.mode = value & 0x1F;
+    }
 protected:
     void FillPipeline();
     void FillPipelineThumb();
@@ -101,11 +117,31 @@ protected:
 
     void SwitchMode(uint8_t mode);
 public:
+    void DoInterrupt()
+    {
+        printf("[ARM%d]: Entering interrupt (0x%08x %d)\n", id, cpsr.t ? *(registers[15]) - 4 : *(registers[15]) - 8, cpsr.t);
+        regs_irq[1] = cpsr.t ? (*(registers[15])) : (*(registers[15]) - 4);
+        spsr_irq.value = cpsr.value;
+        cpsr.t = 0;
+        cpsr.i = 1;
+        cpsr.f = 1;
+        cpsr.mode = MODE_IRQ;
+        SwitchMode(MODE_IRQ);
+        *(registers[15]) = (id == 9) ? 0xFFFF0018 : 0x18;
+        FillPipeline();
+    }
+
     virtual void Dump()
     {
         for (int i = 0; i < 16; i++)
             printf("r%d\t->\t0x%08x\n", i, *(registers[i]));
-        printf("[%s%s%s%s]\n", cpsr.c ? "c" : ".", cpsr.z ? "z" : ".", cpsr.n ? "n" : ".", cpsr.v ? "v" : ".");
+        printf("[%s%s%s%s%s%s]\n", 
+            cpsr.c ? "c" : ".", 
+            cpsr.z ? "z" : ".", 
+            cpsr.n ? "n" : ".", 
+            cpsr.v ? "v" : ".",
+            cpsr.i ? "i" : ".",
+            cpsr.t ? "t" : ".");
     }
 };
 
@@ -116,6 +152,9 @@ private:
     static void BlockDataTransfer(ARMCore* core, uint32_t instr);
     static void Branch(ARMCore* core, uint32_t instr);
     static void SingleDataTransfer(ARMCore* core, uint32_t instr);
+    static void BlxReg(ARMCore* core, uint32_t instr);
+    static void HalfwordDataTransferReg(ARMCore* core, uint32_t instr);
+    static void HalfwordDataTransferImm(ARMCore* core, uint32_t instr);
     static void PsrTransferMRS(ARMCore* core, uint32_t instr);
     static void PsrTransferMSR(ARMCore* core, uint32_t instr);
     static void DataProcessing(ARMCore* core, uint32_t instr);
@@ -126,6 +165,7 @@ private:
     static void Mla(ARMCore* core, uint32_t instr);
     static void Clz(ARMCore* core, uint32_t instr);
     static void Wfi(ARMCore* core, uint32_t instr);
+    static void ChangeStateAndMode(ARMCore* core, uint32_t instr);
 
     // THUMB mode
     static void PushPop(ARMCore* core, uint16_t instr);

@@ -68,7 +68,8 @@ void ARMCore::SwitchMode(uint8_t mode)
         registers[14] = &regs_irq[1];
         cur_spsr = &spsr_irq;
         break;
-    case MODE_SYSTEM_USER:
+    case MODE_USER:
+    case MODE_SYSTEM:
         for (int i = 0; i < 16; i++)
             registers[i] = &regs[i];
         cur_spsr = nullptr;
@@ -99,10 +100,14 @@ bool CondPassed(CPSR& cpsr, uint8_t cond)
         return cpsr.c && !cpsr.z;
     case 0b1001:
         return !cpsr.c || cpsr.z;
+    case 0b1010:
+        return cpsr.n == cpsr.v;
     case 0b1011:
         return cpsr.v != cpsr.n;
+    case 0b1100:
+        return !cpsr.z && (cpsr.v == cpsr.n);
     case 0b1101:
-        return cpsr.z || cpsr.v != cpsr.n;
+        return cpsr.z || (cpsr.v != cpsr.n);
     case 0b1110:
         return true;
     default:
@@ -129,6 +134,29 @@ bool IsBranch(uint32_t instr)
 bool IsSingleDataTransfer(uint32_t instr)
 {
     return ((instr >> 26) & 0x3) == 1;
+}
+
+bool IsBlxReg(uint32_t instr)
+{
+    return ((instr >> 4) & 0xFFFFFF) == 0x12FFF3;
+}
+
+bool IsHalfWordTransferReg(uint32_t instr)
+{
+    return ((instr >> 25) & 0x7) == 0
+        && ((instr >> 8) & 0xF) == 0
+        && ((instr >> 22) & 1) == 0
+        && ((instr >> 7) & 1) == 1
+        && ((instr >> 4) & 1) == 1;
+}
+
+bool IsHalfWordTransferImm(uint32_t instr)
+{
+    return ((instr >> 25) & 0x7) == 0
+        && ((instr >> 8) & 0xF) == 0
+        && ((instr >> 22) & 1) == 1
+        && ((instr >> 7) & 1) == 1
+        && ((instr >> 4) & 1) == 1;
 }
 
 bool IsPSRTransferMSR(uint32_t instr)
@@ -193,6 +221,12 @@ bool IsCLZ(uint32_t instr)
 bool IsWFI(uint32_t instr)
 {
     return (instr & 0xFFFFFFF) == 0x320F003;
+}
+
+bool IsModeFlagChange(uint32_t instr)
+{
+    return ((instr >> 20) & 0xFFF) == 0xF10
+            && ((instr >> 9) & 0xFF) == 0;
 }
 
 void ARMGeneric::BranchExchange(ARMCore *core, uint32_t instr)
@@ -268,7 +302,7 @@ void ARMGeneric::BlockDataTransfer(ARMCore *core, uint32_t instr)
                 num_printed++;
             }
 
-        printf("}\n");
+        printf("} (0x%08x)\n", *(core->registers[rn]));
     }
 
     assert(!s);
@@ -372,7 +406,7 @@ void ARMGeneric::BlockDataTransfer(ARMCore *core, uint32_t instr)
         }
     }
 
-    if (w)
+    if (w && (!l || !(reglist & (1 << rn))))
         *(core->registers[rn]) = addr;
 
     
@@ -497,6 +531,121 @@ void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
         printf("%s%s r%d, [r%d, %s]\n", l ? "ldr" : "str", b ? "b" : "", rd, rn, op2_disasm.c_str());
 }
 
+void ARMGeneric::BlxReg(ARMCore *core, uint32_t instr)
+{
+    uint8_t rn = instr & 0xF;
+
+    uint32_t target = *(core->registers[rn]);
+    *(core->registers[14]) = *(core->registers[15]) - 4;
+    core->cpsr.t = target & 1;
+    *(core->registers[15]) = target & ~1;
+    core->didBranch = true;
+
+    if (core->CanDisassemble)
+        printf("blx r%d\n", rn);
+}
+
+void ARMGeneric::HalfwordDataTransferReg(ARMCore *core, uint32_t instr)
+{
+    bool p = (instr >> 24) & 1;
+    bool u = (instr >> 23) & 1;
+    bool w = (instr >> 21) & 1;
+    bool l = (instr >> 20) & 1;
+    uint8_t sh = (instr >> 5) & 0x3;
+
+    uint8_t rn = (instr >> 16) & 0xF;
+    uint8_t rd = (instr >> 12) & 0xF;
+    uint8_t rm = instr & 0xf;
+
+    uint32_t addr = *(core->registers[rn]);
+    
+    if (p)
+        addr = u ? (addr - *(core->registers[rm])) : (addr + *(core->registers[rm]));
+
+    if  (l)
+    {
+        switch (sh)
+        {
+        default:
+            printf("Unknown sh=%d, l=1\n", sh);
+            exit(1);
+        }
+    }
+    else
+    {
+        switch (sh)
+        {
+        case 1:
+            core->Write16(addr & ~1, *(core->registers[rd]));
+            if (core->CanDisassemble)
+                printf("strh r%d, [r%d, r%d]\n", rd, rn, rm);
+            break;
+        default:
+            printf("Unknown sh=%d, l=0\n", sh);
+            exit(1);
+        }
+    }
+    
+    if (!p)
+        addr = u ? (addr - *(core->registers[rm])) : (addr + *(core->registers[rm]));
+
+    if (!p || w)
+        *(core->registers[rn]) = addr;
+}
+
+void ARMGeneric::HalfwordDataTransferImm(ARMCore *core, uint32_t instr)
+{
+    bool p = (instr >> 24) & 1;
+    bool u = (instr >> 23) & 1;
+    bool w = (instr >> 21) & 1;
+    bool l = (instr >> 20) & 1;
+    uint8_t sh = (instr >> 5) & 0x3;
+
+    uint8_t rn = (instr >> 16) & 0xF;
+    uint8_t rd = (instr >> 12) & 0xF;
+    uint32_t offset = (((instr >> 8) & 0xF) << 4) | (instr & 0xF);
+
+    uint32_t addr = *(core->registers[rn]);
+    
+    if (p)
+        addr = u ? (addr - offset) : (addr + offset);
+
+    if  (l)
+    {
+        switch (sh)
+        {
+        case 1:
+            *(core->registers[rd]) = core->Read16(addr & ~1);
+            if (core->CanDisassemble)
+                printf("ldrh r%d, [r%d, #%d]\n", rd, rn, offset);
+            break;
+        default:
+            printf("Unknown sh=%d, l=1, i=1\n", sh);
+            exit(1);
+        }
+    }
+    else
+    {
+        switch (sh)
+        {
+        case 1:
+            core->Write16(addr & ~1, *(core->registers[rd]));
+            if (core->CanDisassemble)
+                printf("strh r%d, [r%d, #%d]\n", rd, rn, offset);
+            break;
+        default:
+            printf("Unknown sh=%d, l=0, i=1\n", sh);
+            exit(1);
+        }
+    }
+    
+    if (!p)
+        addr = u ? (addr - offset) : (addr + offset);
+
+    if (!p || w)
+        *(core->registers[rn]) = addr;
+}
+
 void ARMGeneric::PsrTransferMRS(ARMCore *core, uint32_t instr)
 {
     bool i = (instr >> 25) & 1;
@@ -509,7 +658,7 @@ void ARMGeneric::PsrTransferMRS(ARMCore *core, uint32_t instr)
         *(core->registers[rd]) = core->cpsr.value;
     
     if (core->CanDisassemble)
-        printf("mrs r%d, %s_fsxc\n", rd, psr ? "spsr" : "cpsr");
+        printf("mrs r%d, %s_fsxc (0x%08x)\n", rd, psr ? "spsr" : "cpsr", *(core->registers[rd]));
 }
 
 void ARMGeneric::PsrTransferMSR(ARMCore *core, uint32_t instr)
@@ -527,9 +676,8 @@ void ARMGeneric::PsrTransferMSR(ARMCore *core, uint32_t instr)
 
     if (i)
     {
-        uint8_t shamt = (instr >> 8) & 0xF;
+        uint8_t shamt = (instr & 0xF00) >> 7;
         uint8_t imm = instr & 0xFF;
-        imm <<= 1;
 
         operand2 = std::rotr<uint32_t>(imm, shamt);
         op2_disasm = "#" + std::to_string(imm);
@@ -544,23 +692,21 @@ void ARMGeneric::PsrTransferMSR(ARMCore *core, uint32_t instr)
     }
 
     uint32_t mask = 0;
-    if (f)
+    if (instr & (1 << 19))
         mask |= 0xFF000000;
-    if (s)
-        mask |= 0xFF0000;
-    if (x)
-        mask |= 0xFF00;
-    if (c)
+    if (instr & (1 << 16))
         mask |= 0xFF;
     
-    if (core->cpsr.mode == MODE_SYSTEM_USER)
+    if (core->cpsr.mode == MODE_USER)
         mask &= 0xFFFFFF00;
     if (!psr)
         mask &= 0xFFFFFFDF;
     
-    operand2 &= mask;
+    uint32_t value = core->cpsr.value;
+    value &= ~mask;
+    value |= (operand2 & mask);
 
-    core->cpsr.value = (core->cpsr.value & ~mask) | operand2;
+    core->SetCPSR(value);
 
     if (core->CanDisassemble)
     {
@@ -599,6 +745,25 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
     uint32_t operand2;
     std::string op2_disasm;
 
+    bool set_carry = false;
+
+    switch (opcode)
+    {
+        case 0x0:
+        case 0x1:
+        case 0x8:
+        case 0x9:
+        case 0xC:
+        case 0xD:
+        case 0xE:
+        case 0xF:
+            set_carry = s;
+            break;
+        default:
+            set_carry = false;
+            break;
+    }
+
     if (i)
     {
         uint32_t imm = instr & 0xff;
@@ -620,52 +785,68 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
             uint8_t rs = (instr >> 8) & 0xF;
             uint8_t rm = instr & 0xF;
             operand2 = *(core->registers[rm]);
+            if (rm == 15)
+                operand2 += 4;
 
             uint8_t shamt = *(core->registers[rs]) & 0xFF;
             uint8_t shtype = (instr >> 5) & 0x3;
 
-            op2_disasm = "r" + std::to_string(rm);
-            if (shamt)
-            {
-                switch (shtype)
-                {
-                case 0:
-                {
-                    core->cpsr.c = (operand2 >> (32-shamt)) & 1;
-                    operand2 <<= shamt;
-                    op2_disasm += ", lsl r" + std::to_string(rs);
-                    break;
-                }
-                case 1:
-                {
-                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
-                    operand2 >>= shamt;
-                    op2_disasm += ", lsr r" + std::to_string(rs);
-                    break;
-                }
-                case 2:
-                {
-                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
-                    int32_t tmp = operand2;
-                    tmp >>= shamt;
-                    operand2 = tmp;
-                    op2_disasm += ", asr r" + std::to_string(rs);
-                    break;
-                }
-                default:
-                    printf("Unknown shift type %d with shamt != 0\n", shtype);
-                    exit(1);
-                }
+            if (shamt >= 32)
+            {    
+                operand2 = 0;
+                op2_disasm = ", #0";
+                core->cpsr.c = false;
+                core->cpsr.z = true;
+                core->cpsr.n = false;
             }
             else
             {
-                switch (shtype)
+                op2_disasm = "r" + std::to_string(rm);
+                if (shamt)
                 {
-                case 0:
-                    break;
-                default:
-                    printf("Unknown shift type %d with shamt=0\n", shtype);
-                    exit(1);
+                    switch (shtype)
+                    {
+                    case 0:
+                    {
+                        if (set_carry)
+                            core->cpsr.c = (operand2 >> (32-shamt)) & 1;
+                        operand2 <<= shamt;
+                        op2_disasm += ", lsl r" + std::to_string(rs);
+                        break;
+                    }
+                    case 1:
+                    {
+                        if (set_carry)
+                            core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                        operand2 >>= shamt;
+                        op2_disasm += ", lsr r" + std::to_string(rs);
+                        break;
+                    }
+                    case 2:
+                    {
+                        if (set_carry)
+                            core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                        int32_t tmp = operand2;
+                        tmp >>= shamt;
+                        operand2 = tmp;
+                        op2_disasm += ", asr r" + std::to_string(rs);
+                        break;
+                    }
+                    default:
+                        printf("Unknown shift type %d with shamt != 0\n", shtype);
+                        exit(1);
+                    }
+                }
+                else
+                {
+                    switch (shtype)
+                    {
+                    case 0:
+                        break;
+                    default:
+                        printf("Unknown shift type %d with shamt=0\n", shtype);
+                        exit(1);
+                    }
                 }
             }
         }
@@ -677,6 +858,8 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
             uint8_t shamt = (instr >> 7) & 0x1F;
             uint8_t shtype = (instr >> 5) & 0x3;
 
+            assert(shamt < 32);
+
             op2_disasm = "r" + std::to_string(rm);
             if (shamt)
             {
@@ -684,21 +867,24 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
                 {
                 case 0:
                 {
-                    core->cpsr.c = (operand2 >> (32-shamt)) & 1;
+                    if (set_carry)
+                        core->cpsr.c = (operand2 >> (32-shamt)) & 1;
                     operand2 <<= shamt;
                     op2_disasm += ", lsl #" + std::to_string(shamt);
                     break;
                 }
                 case 1:
                 {
-                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    if (set_carry)
+                        core->cpsr.c = (operand2 >> (shamt-1)) & 1;
                     operand2 >>= shamt;
                     op2_disasm += ", lsr #" + std::to_string(shamt);
                     break;
                 }
                 case 2:
                 {
-                    core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    if (set_carry)
+                        core->cpsr.c = (operand2 >> (shamt-1)) & 1;
                     int32_t tmp = operand2;
                     tmp >>= shamt;
                     operand2 = tmp;
@@ -744,6 +930,24 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
 
         break;
     }
+    case 0x01:
+    {
+        uint32_t result = *(core->registers[rn]) ^ operand2;
+
+
+        if (s)
+        {
+            core->cpsr.z = (result == 0);
+            core->cpsr.n = (result >> 31) & 1;
+        }
+
+        *(core->registers[rd]) = result;
+
+        if (core->CanDisassemble)
+            printf("eor%s r%d,r%d,%s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+
+        break;
+    }
     case 0x02:
     {
         uint32_t result = *(core->registers[rn]) - operand2;
@@ -751,6 +955,13 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         if (s)
         {
             UpdateFlagsSub(core, *(core->registers[rn]), operand2, result);
+        }
+
+        if (s && rd == 15)
+        {
+            core->cpsr.value = core->cur_spsr->value;
+            core->SwitchMode(core->cpsr.mode);
+            printf("Returning from interrupt (0x%08x)\n", result);
         }
         
         *(core->registers[rd]) = result;
@@ -887,7 +1098,6 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
     {
         uint32_t result = *(core->registers[rn]) | operand2;
 
-
         if (s)
         {
             core->cpsr.z = (result == 0);
@@ -897,7 +1107,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         *(core->registers[rd]) = result;
 
         if (core->CanDisassemble)
-            printf("orr r%d,r%d,%s\n", rd, rn, op2_disasm.c_str());
+            printf("orr%s r%d,r%d,%s (0x%08x)\n", s ? "s" : "", rd, rn, op2_disasm.c_str(), result);
 
         break;
     }
@@ -919,7 +1129,6 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
     {
         uint32_t result = *(core->registers[rn]) & ~operand2;
 
-
         if (s)
         {
             core->cpsr.z = (result == 0);
@@ -929,7 +1138,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         *(core->registers[rd]) = result;
 
         if (core->CanDisassemble)
-            printf("bic%s r%d,r%d,%s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+            printf("bic%s r%d,r%d,%s (0x%08x)\n", s ? "s" : "", rd, rn, op2_disasm.c_str(), result);
 
         break;
     }
@@ -1073,7 +1282,7 @@ void ARMGeneric::Clz(ARMCore *core, uint32_t instr)
     *(core->registers[rd]) = bits;
 
     if (core->CanDisassemble)
-        printf("clz r%d,r%d\n", rd, rs);
+        printf("clz r%d,r%d (%d)\n", rd, rs, bits);
 }
 
 void ARMGeneric::Wfi(ARMCore *core, uint32_t instr)
@@ -1082,6 +1291,34 @@ void ARMGeneric::Wfi(ARMCore *core, uint32_t instr)
     core->halted = true;
     if (core->CanDisassemble)
         printf("wfi\n");
+}
+
+void ARMGeneric::ChangeStateAndMode(ARMCore *core, uint32_t instr)
+{
+    uint8_t opcode = (instr >> 17) & 0x7;
+
+    bool a = (instr >> 8) & 1;
+    bool i = (instr >> 7) & 1;
+    bool f = (instr >> 6) & 1;
+
+    switch (opcode)
+    {
+    case 0b110:
+    {
+        if (i)
+            core->cpsr.i = 1;
+        if (f)
+            core->cpsr.f = 1;
+        if (a)
+            core->cpsr.a = 1;
+        if (core->CanDisassemble)
+            printf("cpsid %s%s%s\n", a ? "a" : "", i ? "i" : "", f ? "f" : "");
+        break;
+    }
+    default:
+        printf("Unknown change state/mode opcode 0x%02x\n", opcode);
+        exit(1);
+    }
 }
 
 void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
@@ -1094,6 +1331,11 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
         if (IsBlxOffset(instr))
         {
             BlxOffset(core, instr);
+            return;
+        }
+        else if (IsModeFlagChange(instr))
+        {
+            ChangeStateAndMode(core, instr);
             return;
         }
 
@@ -1133,6 +1375,11 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
         Wfi(core, instr);
         return;
     }
+    else if (IsBlxReg(instr))
+    {
+        BlxReg(core, instr);
+        return;
+    }
     else if (IsPSRTransferMSR(instr))
     {
         PsrTransferMSR(core, instr);
@@ -1156,6 +1403,16 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
     else if (IsCLZ(instr))
     {
         Clz(core, instr);
+        return;
+    }
+    else if (IsHalfWordTransferReg(instr))
+    {
+        HalfwordDataTransferReg(core, instr);
+        return;
+    }
+    else if (IsHalfWordTransferImm(instr))
+    {
+        HalfwordDataTransferImm(core, instr);
         return;
     }
     else if (IsDataProcessing(instr))

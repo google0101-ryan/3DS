@@ -4,6 +4,8 @@ set(CMAKE_MINIMUM_REQUIRED_VERSION 3.16.3)
 
 set(CXX_STANDARD c++20)
 
+set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}")
+
 set(SOURCES src/main.cpp
             src/app/Application.cpp
 			      src/System.cpp
@@ -18,7 +20,15 @@ set(SOURCES src/main.cpp
             src/dma/ndma.cpp
             src/i2c/i2c.cpp
             src/pxi/pxi.cpp
-            src/timers/arm9_timers.cpp)
+            src/timers/arm9_timers.cpp
+            src/crypto/rsa.cpp
+            src/crypto/sha.cpp
+            src/crypto/aes.cpp
+            src/crypto/aes_lib.c
+            src/storage/emmc.cpp
+            src/gpu/gpu.cpp)
+
+find_package(GMP REQUIRED)
 
 set(CMAKE_BUILD_TYPE Debug)
 
@@ -31,6 +41,7 @@ find_package(SDL2 REQUIRED)
 include_directories(3ds ${SDL2_INCLUDE_DIRS})
 
 target_link_libraries(3ds ${SDL2_LIBRARIES})
+target_link_libraries(3ds gmp)
 
 if(MSVC)
   target_compile_options(${TARGET_NAME} PRIVATE /W4 /WX)

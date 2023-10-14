@@ -29,6 +29,8 @@ void ARM9Core::Reset()
     SwitchMode(MODE_SUPERVISOR);
 
     cpsr.value = 0;
+    cpsr.i = 1;
+    cpsr.f = 1;
     cpsr.mode = MODE_SUPERVISOR;
 
     FillPipeline();
@@ -36,6 +38,12 @@ void ARM9Core::Reset()
 
 void ARM9Core::Run()
 {
+    if (Bus::GetInterruptPending9() && !cpsr.i)
+    {
+        DoInterrupt();
+        halted = false;
+    }
+
     if (halted)
         return;
 
@@ -46,13 +54,16 @@ void ARM9Core::Run()
         uint16_t instr = AdvancePipelineThumb();
 
         if (CanDisassemble)
-            printf("0x%04x (t): ", instr);
+            printf("0x%04x (0x%08x) (t): ", *(registers[15]) - 4, instr);
         
         ARMGeneric::DoTHUMBInstruction(this, instr);
     }
     else
     {   
         didBranch = false;
+
+        if (CanDisassemble)
+            printf("0x%08x ",  *(registers[15]) - 8);
 
         uint32_t instr = AdvancePipeline();
         ARMGeneric::DoARMInstruction(this, instr);

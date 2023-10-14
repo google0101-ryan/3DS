@@ -24,10 +24,16 @@ void CP15::WriteRegister(int cpopc, int cn, int cm, int cp, uint32_t data)
     case 0x0201:
     case 0x0202:
     case 0x0300:
+    case 0x3f00:
+    case 0x3f10:
+    case 0x3f20:
+    case 0x3f30:
+    case 0x3f40:
         // TODO: MMU registers
         break;
     case 0x0102:
     case 0x0750 ... 0x770:
+    case 0x07a1:
     case 0x07a4:
     case 0x07e0:
     case 0x07e1:

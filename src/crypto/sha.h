@@ -2,10 +2,12 @@
 
 #include <stdint.h>
 
-namespace NDMA
+namespace SHA
 {
 
-uint32_t Read32(uint32_t addr);
 void Write32(uint32_t addr, uint32_t data);
+uint32_t Read32(uint32_t addr);
+
+uint8_t ReadHash(uint32_t addr);
 
 }
