@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 
 int AddrToBusNum(uint32_t addr)
 {
@@ -50,15 +51,18 @@ struct Bus
     BusCtrl ctrl;
     CntEx cnt;
     int byteindex;
-    uint8_t bytes[256];
+	uint8_t data;
 
     int selectedDevice;
     bool deviceSelected = false;
     bool reading = false;
-
-    bool regSelected = false;
-    uint8_t reg = 0;
 } busses[3];
+
+struct Device
+{
+	uint8_t cur_reg;
+	bool reg_selected;
+} devices[3][0x100];
 
 void WriteMCU(int reg, uint8_t byte)
 {
@@ -67,22 +71,43 @@ void WriteMCU(int reg, uint8_t byte)
     case 0x4A:
         break;
     default:
-        printf("[I2C/MCU]: Write to unknown reg %x\n", reg);
+        printf("[I2C/MCU]: Write 0x%02x to unknown reg %x\n", byte, reg);
         exit(1);
     }
-
-    busses[1].deviceSelected = false;
-    busses[1].regSelected = false;
 }
 
-void SendByteDevice(int deviceNum, int regNum, uint8_t byte)
+uint8_t ReadMCU(int reg)
 {
-    switch (deviceNum)
+	switch (reg)
     {
-    case 0x4A:
-        return WriteMCU(regNum, byte);
+	case 0x0F:
+		return (1 << 1) /*Shell open*/;
     default:
-        printf("[I2C]: Write to unknown device %x\n", deviceNum);
+        printf("[I2C/MCU]: Read from unknown reg %x\n", reg);
+        exit(1);
+    }
+}
+
+void SendByteDevice(int bus, int deviceNum, uint8_t byte)
+{
+    switch ((bus << 8) | deviceNum)
+    {
+    case 0x14A:
+        return WriteMCU(devices[bus][deviceNum].cur_reg, byte);
+    default:
+        printf("[I2C%d]: Write to unknown device %x\n", bus, deviceNum);
+        exit(1);
+    }
+}
+
+uint8_t ReadByteDevice(int bus, int deviceNum)
+{
+	switch ((bus << 8) | deviceNum)
+    {
+	case 0x14A:
+		return ReadMCU(devices[bus][deviceNum].cur_reg);
+	default:
+        printf("[I2C%d]: Read from unknown device %x\n", bus, deviceNum);
         exit(1);
     }
 }
@@ -94,12 +119,56 @@ uint8_t I2C::Read8(uint32_t addr)
 
     switch (reg)
     {
+	case 0:
+		return busses[bus].data;
     case 1:
         return busses[bus].ctrl.value;
     default:
         printf("[I2C_%d]: Read from unknown reg %d\n", bus, reg);
         exit(1);
     }
+}
+
+void DoTransfer(int id)
+{
+	auto& bus = busses[id];
+
+	bus.ctrl.status = 0;
+	if (bus.ctrl.start)
+	{
+		uint8_t dev = bus.data & ~1;
+		if (!bus.deviceSelected)
+		{
+			devices[id][dev].reg_selected = false;
+			printf("[I2C%d] Selecting device 0x%02x\n", id, dev);
+		}
+		bus.deviceSelected = true;
+		bus.selectedDevice = dev;
+	}
+	else
+	{
+		uint8_t cur_dev = bus.selectedDevice;
+		if (!devices[id][cur_dev].reg_selected)
+		{
+			devices[id][cur_dev].reg_selected = true;
+			devices[id][cur_dev].cur_reg = bus.data;
+
+			printf("[I2C%d]: Selecting device 0x%02x, reg 0x%02x\n", id, cur_dev, bus.data);
+		}
+		else
+		{
+			if (bus.ctrl.data_dir)
+				bus.data = ReadByteDevice(id, cur_dev);
+			else
+				SendByteDevice(id, cur_dev, bus.data);
+			devices[id][cur_dev].cur_reg++;
+		}
+		if (bus.ctrl.stop)
+		{
+			devices[id][cur_dev].reg_selected = false;
+			bus.deviceSelected = false;
+		}
+	}
 }
 
 void I2C::Write8(uint32_t addr, uint8_t data)
@@ -110,27 +179,17 @@ void I2C::Write8(uint32_t addr, uint8_t data)
     switch (reg)
     {
     case 0:
-        if (!busses[bus].deviceSelected)
-        {
-            busses[bus].selectedDevice = data & ~1;
-            busses[bus].deviceSelected = true;
-            busses[bus].reading = data & 1;
-        }
-        else if (!busses[bus].regSelected)
-        {
-            busses[bus].regSelected = true;
-            busses[bus].reg = data;
-            printf("[I2C]: Selecting reg %x, device %d:%x\n", busses[bus].reg, bus, busses[bus].selectedDevice);
-        }
-        else
-        {
-            SendByteDevice(busses[bus].selectedDevice, busses[bus].reg, data);
-        }
+		busses[bus].data = data;
         break;
     case 1:
     {
         busses[bus].ctrl.value = data;
         busses[bus].ctrl.status = 0;
+		if (data & (1 << 7))
+		{
+			busses[bus].ctrl.ack = true;
+			DoTransfer(bus);
+		}
         break;
     }
     default:

@@ -7,6 +7,11 @@
 
 #include "cp15.h"
 
+#define ADD_OVERFLOW(a, b, result) ((!(((a) ^ (b)) & 0x80000000)) && (((a) ^ (result)) & 0x80000000))
+#define SUB_OVERFLOW(a, b, result) (((a) ^ (b)) & 0x80000000) && (((a) ^ (result)) & 0x80000000)
+#define CARRY_SUB(a, b) (a > b)
+#define CARRY_ADD(a, b)  ((0xFFFFFFFF-a) < b)
+
 template<typename T>
 inline T sign_extend(T x, int bits)
 {
@@ -101,12 +106,6 @@ protected:
         cpsr.mode = value & 0x1F;
     }
 protected:
-    void FillPipeline();
-    void FillPipelineThumb();
-
-    uint32_t AdvancePipeline();
-    uint16_t AdvancePipelineThumb();
-
     virtual uint8_t Read8(uint32_t addr) = 0;
     virtual uint16_t Read16(uint32_t addr) = 0;
     virtual uint32_t Read32(uint32_t addr) = 0;
@@ -127,8 +126,7 @@ public:
         cpsr.f = 1;
         cpsr.mode = MODE_IRQ;
         SwitchMode(MODE_IRQ);
-        *(registers[15]) = (id == 9) ? 0xFFFF0018 : 0x18;
-        FillPipeline();
+        *(registers[15]) = (id == 9) ? 0xFFFF0018+8 : 0x18+8;
     }
 
     virtual void Dump()
@@ -162,10 +160,12 @@ private:
     static void MoveToCP(ARMCore* core, uint32_t instr);
     static void BlxOffset(ARMCore* core, uint32_t instr);
     static void Umull(ARMCore* core, uint32_t instr);
+    static void Umlal(ARMCore* core, uint32_t instr);
     static void Mla(ARMCore* core, uint32_t instr);
     static void Clz(ARMCore* core, uint32_t instr);
     static void Wfi(ARMCore* core, uint32_t instr);
     static void ChangeStateAndMode(ARMCore* core, uint32_t instr);
+	static void Mul(ARMCore* core, uint32_t instr);
 
     // THUMB mode
     static void PushPop(ARMCore* core, uint16_t instr);
@@ -191,6 +191,7 @@ private:
 
     static void UpdateFlagsSub(ARMCore* core, uint32_t source, uint32_t operand2, uint32_t result);
     static void UpdateFlagsSbc(ARMCore* core, uint32_t source, uint32_t operand2, uint32_t result);
+	static void UpdateFlagsAdd(ARMCore* core, uint32_t a, uint32_t b, uint32_t result);
 public:
     static void DoARMInstruction(ARMCore* core, uint32_t instr);
     static void DoTHUMBInstruction(ARMCore* core, uint16_t instr);

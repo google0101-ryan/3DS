@@ -21,7 +21,7 @@ ARM11Core::ARM11Core()
 
 void ARM11Core::Reset()
 {
-    CanDisassemble = true;
+    CanDisassemble = false;
 
     memset(regs, 0, sizeof(regs));
     memset(regs_svc, 0, sizeof(regs_svc));
@@ -37,7 +37,7 @@ void ARM11Core::Reset()
 
     id = 11;
 
-    FillPipeline();
+	regs[15] += 8;
 }
 
 void ARM11Core::Run()
@@ -64,7 +64,7 @@ void ARM11Core::Run()
         if (CanDisassemble)
             printf("Core %d (t): 0x%08x: ", coreId+1, *(registers[15]) - 4);
 
-        uint16_t instr = AdvancePipelineThumb();
+        uint16_t instr = Read16(*(registers[15]) - 4);
         ARMGeneric::DoTHUMBInstruction(this, instr);
     }
     else
@@ -74,21 +74,21 @@ void ARM11Core::Run()
         if (CanDisassemble)
             printf("Core %d: 0x%08x: ", coreId+1, *(registers[15]) - 8);
 
-        uint32_t instr = AdvancePipeline();
+        uint32_t instr = Read32(*(registers[15]) - 8);
         ARMGeneric::DoARMInstruction(this, instr);
     }
 
     if (cpsr.t)
     {
         if (didBranch)
-            FillPipelineThumb();
+			*(registers[15]) += 4;
         else
             *(registers[15]) += 2;
     }
     else
     {
         if (didBranch)
-            FillPipeline();
+			*(registers[15]) += 8;
         else
             *(registers[15]) += 4;
     }

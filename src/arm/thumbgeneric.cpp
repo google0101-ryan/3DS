@@ -1063,10 +1063,6 @@ void ARMGeneric::ThumbLDMSTM(ARMCore *core, uint16_t instr)
     }
 }
 
-#define ADD_OVERFLOW(a, b, result) ((!(((a) ^ (b)) & 0x80000000)) && (((a) ^ (result)) & 0x80000000))
-#define SUB_OVERFLOW(a, b, result) (((a) ^ (b)) & 0x80000000) && (((a) ^ (result)) & 0x80000000)
-#define CARRY_SUB(a, b) (a > b)
-
 void ARMGeneric::UpdateFlagsSub(ARMCore* core, uint32_t source, uint32_t operand2, uint32_t result)
 {
     uint64_t unsigned_result = source - operand2;
@@ -1085,4 +1081,12 @@ void ARMGeneric::UpdateFlagsSbc(ARMCore *core, uint32_t source, uint32_t operand
     uint32_t res = temp - borrow;
     core->cpsr.c = !(CARRY_SUB(source, operand2) & CARRY_SUB(temp, borrow));
     core->cpsr.v = SUB_OVERFLOW(source, operand2, temp) | SUB_OVERFLOW(temp, borrow, res);
+}
+
+void ARMGeneric::UpdateFlagsAdd(ARMCore *core, uint32_t a, uint32_t b, uint32_t result)
+{
+	core->cpsr.n = (result >> 31) & 1;
+	core->cpsr.z = !result;
+	core->cpsr.c = ((0xFFFFFFFF-a) < b);
+	core->cpsr.v = ADD_OVERFLOW(a, b, result);
 }

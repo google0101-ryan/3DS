@@ -18,38 +18,6 @@ std::string HexToString(uint32_t num)
     return ret;
 }
 
-void ARMCore::FillPipeline()
-{
-    pipeline[0] = Read32(*(registers[15]));
-    *(registers[15]) += 4;
-    pipeline[1] = Read32(*(registers[15]));
-    *(registers[15]) += 4;
-}
-
-void ARMCore::FillPipelineThumb()
-{
-    t_pipeline[0] = Read16(*(registers[15]));
-    *(registers[15]) += 2;
-    t_pipeline[1] = Read16(*(registers[15]));
-    *(registers[15]) += 2;
-}
-
-uint32_t ARMCore::AdvancePipeline()
-{
-    uint32_t data = pipeline[0];
-    pipeline[0] = pipeline[1];
-    pipeline[1] = Read32(*(registers[15]));
-    return data;
-}
-
-uint16_t ARMCore::AdvancePipelineThumb()
-{
-    uint16_t data = t_pipeline[0];
-    t_pipeline[0] = t_pipeline[1];
-    t_pipeline[1] = Read16(*(registers[15]));
-    return data;
-}
-
 void ARMCore::SwitchMode(uint8_t mode)
 {
     switch (mode)
@@ -153,7 +121,7 @@ bool IsHalfWordTransferReg(uint32_t instr)
 bool IsHalfWordTransferImm(uint32_t instr)
 {
     return ((instr >> 25) & 0x7) == 0
-        && ((instr >> 8) & 0xF) == 0
+        // && ((instr >> 8) & 0xF) == 0
         && ((instr >> 22) & 1) == 1
         && ((instr >> 7) & 1) == 1
         && ((instr >> 4) & 1) == 1;
@@ -175,6 +143,20 @@ bool IsPSRTransferMRS(uint32_t instr)
             && ((instr >> 21) & 1) == 0
             && ((instr >> 16) & 0xF) == 0xF
             && ((instr >> 20) & 1) == 0;
+}
+
+bool IsUmlal(uint32_t instr)
+{
+	return ((instr >> 25) & 0xF) == 0
+			&& ((instr >> 21) & 0xF) == 0x5
+			&& ((instr >> 4) & 0xF) == 0x9;
+}
+
+bool IsMul(uint32_t instr)
+{
+	return ((instr >> 25) & 0x7) == 0
+		&& ((instr >> 21) & 0xF) == 0
+		&& ((instr >> 4) & 0xF) == 9;
 }
 
 bool IsDataProcessing(uint32_t instr)
@@ -227,6 +209,24 @@ bool IsModeFlagChange(uint32_t instr)
 {
     return ((instr >> 20) & 0xFFF) == 0xF10
             && ((instr >> 9) & 0xFF) == 0;
+}
+
+bool IsMulInstr(uint32_t instr)
+{
+	return ((instr >> 25) & 0xF) == 0
+			&& ((instr >> 21) & 0xF) != 3
+			&& ((instr >> 21) & 0xF) <= 0x7
+			&& ((instr >> 4) & 0xF) == 0x9;
+}
+
+bool IsHalfwordMul(uint32_t instr)
+{
+	return ((instr >> 25) & 0xF) == 0
+			&& ((instr >> 21) & 0xF) >= 0x8
+			&& ((instr >> 21) & 0xF) <= 0xB
+			&& ((instr >> 7) & 0x1) == 0x1
+			&& ((instr >> 4) & 0x1) == 0x0
+			&& ((instr >> 20) & 1) == 0;
 }
 
 void ARMGeneric::BranchExchange(ARMCore *core, uint32_t instr)
@@ -418,6 +418,12 @@ void ARMGeneric::BlockDataTransfer(ARMCore *core, uint32_t instr)
             *(core->registers[15]) &= ~1;
         }
         core->didBranch = true;
+		if (*(core->registers[15]) == 0x08004a3c)
+		{
+			printf("Return from f_mount, 0x%08x\n", *(core->registers[0]));
+			if (*(core->registers[0]) == 0xc)
+				exit(1);
+		}
     }
 }
 
@@ -431,6 +437,9 @@ void ARMGeneric::Branch(ARMCore *core, uint32_t instr)
 
     *(core->registers[15]) += imm;
     core->didBranch = true;
+
+	if (*(core->registers[15]) == 0x080049cc)
+		printf("f_mount(0x%08x, 0x%08x, 0x%08x)\n", *(core->registers[0]), *(core->registers[1]), *(core->registers[2]));
 
     if (core->CanDisassemble)
         printf("b%s 0x%08x\n", l ? "l" : "", *(core->registers[15]));
@@ -489,9 +498,17 @@ void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
     {
         if (!b)
         {
-            *(core->registers[rd]) = core->Read32(addr & ~3);
-            if (addr & 3)
-                *(core->registers[rd]) = std::rotr(*(core->registers[rd]), (addr & 3) * 8);
+            // This avoids a nasty wait function that takes seconds to complete
+            if (core->id == 9 && (*(core->registers[15]) - 8) == 0x08005f48)
+            {
+                *(core->registers[rd]) = 0;
+            }
+            else
+            {
+                *(core->registers[rd]) = core->Read32(addr & ~3);
+                if (addr & 3)
+                    *(core->registers[rd]) = std::rotr(*(core->registers[rd]), (addr & 3) * 8);
+            }
         }
         else
         {
@@ -524,11 +541,17 @@ void ARMGeneric::SingleDataTransfer(ARMCore *core, uint32_t instr)
             *(core->registers[15]) &= ~1;
         }
 
+		if (*(core->registers[15]) == 0x8005d68)
+		{
+			printf("Returning from mountSd() (0x%08x)\n", *(core->registers[0]));
+			exit(1);
+		}
+
         core->didBranch = true;
     }
     
     if (core->CanDisassemble)
-        printf("%s%s r%d, [r%d, %s]\n", l ? "ldr" : "str", b ? "b" : "", rd, rn, op2_disasm.c_str());
+        printf("%s%s r%d, [r%d, %s] (0x%08x, 0x%08x)\n", l ? "ldr" : "str", b ? "b" : "", rd, rn, op2_disasm.c_str(), addr, *(core->registers[rd]));
 }
 
 void ARMGeneric::BlxReg(ARMCore *core, uint32_t instr)
@@ -566,6 +589,11 @@ void ARMGeneric::HalfwordDataTransferReg(ARMCore *core, uint32_t instr)
     {
         switch (sh)
         {
+		case 1:
+			*(core->registers[rd]) = core->Read16(addr & ~1);
+			if (core->CanDisassemble)
+				printf("ldrh r%d, [r%d, r%d] (0x%04x, 0x%08x)\n", rd, rn, rm, *(core->registers[rd]), addr);
+			break;
         default:
             printf("Unknown sh=%d, l=1\n", sh);
             exit(1);
@@ -603,21 +631,21 @@ void ARMGeneric::HalfwordDataTransferImm(ARMCore *core, uint32_t instr)
 
     uint8_t rn = (instr >> 16) & 0xF;
     uint8_t rd = (instr >> 12) & 0xF;
-    uint32_t offset = (((instr >> 8) & 0xF) << 4) | (instr & 0xF);
+    int offset = (((instr >> 8) & 0xF) << 4) | (instr & 0xF);
 
     uint32_t addr = *(core->registers[rn]);
     
     if (p)
-        addr = u ? (addr - offset) : (addr + offset);
+        addr = u ? (addr + offset) : (addr - offset);
 
     if  (l)
     {
         switch (sh)
         {
         case 1:
-            *(core->registers[rd]) = core->Read16(addr & ~1);
             if (core->CanDisassemble)
                 printf("ldrh r%d, [r%d, #%d]\n", rd, rn, offset);
+            *(core->registers[rd]) = core->Read16(addr & ~1);
             break;
         default:
             printf("Unknown sh=%d, l=1, i=1\n", sh);
@@ -632,6 +660,18 @@ void ARMGeneric::HalfwordDataTransferImm(ARMCore *core, uint32_t instr)
             core->Write16(addr & ~1, *(core->registers[rd]));
             if (core->CanDisassemble)
                 printf("strh r%d, [r%d, #%d]\n", rd, rn, offset);
+            break;
+        case 2:
+            *(core->registers[rd]) = core->Read32(addr);
+            *(core->registers[rd+1]) = core->Read32(addr+4);
+            if (core->CanDisassemble)
+                printf("ldrd r%d, r%d, [r%d, %s#%d]\n", rd, rd+1, rn,  u ? "" : "-", offset);
+            break;
+        case 3:
+            core->Write32(addr, *(core->registers[rd]));
+            core->Write32(addr+4, *(core->registers[rd+1]));
+            if (core->CanDisassemble)
+                printf("strd r%d, r%d, [r%d, #%d]\n", rd, rd+1, rn, offset);
             break;
         default:
             printf("Unknown sh=%d, l=0, i=1\n", sh);
@@ -832,6 +872,14 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
                         op2_disasm += ", asr r" + std::to_string(rs);
                         break;
                     }
+                    case 3:
+                    {
+                        if (set_carry)
+                            core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                        operand2 = std::rotr<uint32_t>(operand2, shamt);
+                        op2_disasm += ", ror r" + std::to_string(rs);
+                        break;
+                    }
                     default:
                         printf("Unknown shift type %d with shamt != 0\n", shtype);
                         exit(1);
@@ -891,6 +939,14 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
                     op2_disasm += ", asr #" + std::to_string(shamt);
                     break;
                 }
+                case 3:
+                {
+                    if (set_carry)
+                        core->cpsr.c = (operand2 >> (shamt-1)) & 1;
+                    operand2 = std::rotr<uint32_t>(operand2, shamt);
+                    op2_disasm += ", ror #" + std::to_string(shamt);
+                    break;
+                }
                 default:
                     printf("Unknown shift type %d with shamt != 0\n", shtype);
                     exit(1);
@@ -926,7 +982,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         *(core->registers[rd]) = result;
 
         if (core->CanDisassemble)
-            printf("and%s r%d,r%d,%s\n", s ? "s" : "", rd, rn, op2_disasm.c_str());
+            printf("and%s r%d,r%d,%s (0x%08x)\n", s ? "s" : "", rd, rn, op2_disasm.c_str(), result);
 
         break;
     }
@@ -990,17 +1046,12 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         uint32_t result = *(core->registers[rn]) + operand2;
 
         if (s)
-        {
-            core->cpsr.n = (result >> 31) & 1;
-            core->cpsr.v = CalcOverflowAdd(*(core->registers[rn]), operand2, result);
-            core->cpsr.c = (result < *(core->registers[rn]));
-            core->cpsr.z = (result == 0);
-        }
+			UpdateFlagsAdd(core, *(core->registers[rn]), operand2, result);
 
         *(core->registers[rd]) = result;
 
         if (core->CanDisassemble)
-            printf("add r%d, r%d, %s\n", rd, rn, op2_disasm.c_str());
+            printf("add r%d, r%d, %s (0x%08x)\n", rd, rn, op2_disasm.c_str(), result);
         break;
     }
     case 0x5:
@@ -1009,12 +1060,12 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         
         if (s)
         {
-            core->cpsr.z = (result == 0);
-            core->cpsr.n = (result >> 31) & 1;
-            uint32_t temp = *(core->registers[rn]) + operand2;
-            uint32_t res = temp + core->cpsr.c;
-            core->cpsr.v = CalcOverflowAdd(*(core->registers[rn]), operand2, temp) | CalcOverflowAdd(temp, core->cpsr.c, result);
-            core->cpsr.c = ((0xFFFFFFFF-*(core->registers[rn])) < operand2) | ((0xFFFFFFFF-temp) < core->cpsr.c);
+			uint32_t temp = *(core->registers[rn]) + operand2;
+			uint32_t res = temp + core->cpsr.c;
+			core->cpsr.v = ADD_OVERFLOW(*(core->registers[rn]), operand2, temp) | ADD_OVERFLOW(temp, core->cpsr.c, res);
+			core->cpsr.c = CARRY_ADD(*(core->registers[rn]), operand2) | CARRY_ADD(temp, core->cpsr.c);
+			core->cpsr.z = !res;
+			core->cpsr.n = (res >> 31) & 1;
         }
 
         *(core->registers[rd]) = result;
@@ -1063,7 +1114,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         core->cpsr.n = (result >> 31) & 1;
 
         if (core->CanDisassemble)
-            printf("tst r%d,r%d,%s\n", rd, rn, op2_disasm.c_str());
+            printf("tst r%d,%s\n", rn, op2_disasm.c_str());
 
         break;
     }
@@ -1076,7 +1127,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
         UpdateFlagsSub(core, *(core->registers[rn]), operand2, result);
 
         if (core->CanDisassemble)
-            printf("cmp r%d, %s\n", rn, op2_disasm.c_str());
+            printf("cmp r%d, %s (0x%08x)\n", rn, op2_disasm.c_str(), result);
         break;
     }
     case 0x0b:
@@ -1085,10 +1136,7 @@ void ARMGeneric::DataProcessing(ARMCore *core, uint32_t instr)
 
         assert(s);
 
-        core->cpsr.n = (result >> 31) & 1;
-        core->cpsr.v = CalcOverflowAdd(*(core->registers[rn]), operand2, result);
-        core->cpsr.c = (result < *(core->registers[rn]));
-        core->cpsr.z = (result == 0);
+		UpdateFlagsAdd(core, *(core->registers[rn]), operand2, result);
 
         if (core->CanDisassemble)
             printf("cmn r%d, %s\n", rn, op2_disasm.c_str());
@@ -1234,6 +1282,33 @@ void ARMGeneric::Umull(ARMCore *core, uint32_t instr)
         printf("umull%s r%d,r%d,r%d,r%d\n", s ? "s" : "", rdLo, rdHi, rm, rs);
 }
 
+void ARMGeneric::Umlal(ARMCore *core, uint32_t instr)
+{
+    bool s = (instr >> 20) & 1;
+    uint8_t rdHi = (instr >> 16) & 0xF;
+    uint8_t rdLo = (instr >> 12) & 0xF;
+    uint8_t rs = (instr >> 8) & 0xF;
+    uint8_t rm = instr & 0xf;
+
+	uint64_t addend = *(core->registers[rdLo]);
+	addend |= ((uint64_t)*(core->registers[rdHi])) << 32;
+
+    uint64_t result = (uint64_t)*(core->registers[rm]) * (uint64_t)*(core->registers[rs]);
+	result += addend;
+
+    if (s)
+    {
+        core->cpsr.z = (result == 0);
+        core->cpsr.n = (result >> 31) & 1;
+    }
+
+    *(core->registers[rdHi]) = (result >> 32);
+    *(core->registers[rdLo]) = (uint32_t)result;
+
+    if (core->CanDisassemble)
+        printf("umlal%s r%d,r%d,r%d,r%d\n", s ? "s" : "", rdLo, rdHi, rm, rs);
+}
+
 void ARMGeneric::Mla(ARMCore *core, uint32_t instr)
 {
     bool s = (instr >> 20) & 1;
@@ -1321,6 +1396,27 @@ void ARMGeneric::ChangeStateAndMode(ARMCore *core, uint32_t instr)
     }
 }
 
+void ARMGeneric::Mul(ARMCore *core, uint32_t instr)
+{
+	bool s = (instr >> 20) & 1;
+	uint8_t rd = (instr >> 16) & 0xF;
+	uint8_t rs = (instr >> 8) & 0xF;
+	uint8_t rm = instr & 0xF;
+
+	uint32_t result = *(core->registers[rm]) * *(core->registers[rs]);
+
+	if (s)
+	{
+		core->cpsr.z = (result == 0);
+		core->cpsr.n = ((result >> 31) & 1) != 0;
+	}
+
+	*(core->registers[rd]) = result;
+
+	if (core->CanDisassemble)
+		printf("mul r%d,r%d,r%d\n", rd, rm, rs);
+}
+
 void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
 {
     if (core->CanDisassemble)
@@ -1395,6 +1491,11 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
         Umull(core, instr);
         return;
     }
+	else if (IsUmlal(instr))
+	{
+		Umlal(core, instr);
+		return;
+	}
     else if (IsMLA(instr))
     {
         Mla(core, instr);
@@ -1415,6 +1516,21 @@ void ARMGeneric::DoARMInstruction(ARMCore *core, uint32_t instr)
         HalfwordDataTransferImm(core, instr);
         return;
     }
+	else if (IsMul(instr))
+	{
+		Mul(core, instr);
+		return;
+	}
+	else if (IsMulInstr(instr))
+	{
+		printf("TODO: Mul instr 0x%08x\n", instr);
+		exit(1);
+	}
+	else if (IsHalfwordMul(instr))
+	{
+		printf("TODO: Halfword mul instr 0x%08x\n", instr);
+		exit(1);
+	}
     else if (IsDataProcessing(instr))
     {
         DataProcessing(core, instr);

@@ -17,6 +17,9 @@ uint8_t* axi_wram;
 CDMA* dma11, *dma9;
 PicaGpu* gpu;
 
+uint64_t otp_console_id;
+uint8_t twlunitinfo;
+
 uint8_t itcm[0x8000], dtcm[0x4000];
 uint8_t arm9_wram[0x100000];
 uint32_t itcm_start, itcm_size;
@@ -165,6 +168,7 @@ uint8_t Bus::ARM11::Read8(uint32_t addr)
     case 0x10141220:
         return 2;
     case 0x10161001:
+    case 0x10144000:
     case 0x10144001:
     case 0x10148001:
         return I2C::Read8(addr);
@@ -329,6 +333,8 @@ uint8_t Bus::ARM9::Read8(uint32_t addr)
         return RSA::Read8(addr);
     if (addr >= 0x10160000 && addr < 0x10161000)
         return 0;
+    if (addr >= 0x1ff80000 && addr < 0x20000000)
+       return axi_wram[addr & 0x7FFFF];
     
     switch (addr)
     {
@@ -339,13 +345,19 @@ uint8_t Bus::ARM9::Read8(uint32_t addr)
     case 0x10010010:
     case 0x10000008:
         return 0;
+    case 0x10010014:
+        return twlunitinfo;
     case 0x10009011:
         return AES::ReadKEYCNT();
+    case 0x10144000 ... 0x10144004:
+        return I2C::Read8(addr);
     }
 
     printf("Read8 unknown addr 0x%08x\n", addr);
     exit(1);
 }
+
+bool firstPadRead = true;
 
 uint16_t Bus::ARM9::Read16(uint32_t addr)
 {
@@ -357,13 +369,15 @@ uint16_t Bus::ARM9::Read16(uint32_t addr)
         return *(uint16_t*)&boot9[addr & 0xFFFF];
     if (addr >= 0x10006000 && addr < 0x10007000)
         return eMMC::Read16(addr);
+    if (addr >= 0x08000000 && addr < 0x08100000)
+        return *(uint16_t*)&arm9_wram[addr & 0xFFFFF];
     
     switch (addr)
     {
     case 0x10003000 ... 0x1000300E:
         return Timers::Read16(addr);
     case 0x10146000:
-        return 0xFFF;
+		return 0xFFF;
     case 0x10008004:
         return PXI::ReadCnt9();
     }
@@ -412,6 +426,10 @@ uint32_t Bus::ARM9::Read32(uint32_t addr)
         return dma9->Read32(addr);
     case 0x10008000:
         return PXI::ReadSync9();
+    case 0x10140FFC:
+        return 0x5;
+    case 0x10146000:
+		return 0xFFF;
     }
 
     printf("[ARM9]: Read32 unknown addr 0x%08x\n", addr);
@@ -468,6 +486,12 @@ void Bus::ARM9::Write8(uint32_t addr, uint8_t data)
     case 0x10009011:
         AES::WriteKEYCNT(data);
         return;
+    case 0x10010014:
+        twlunitinfo = data;
+        return;
+    case 0x10144000 ... 0x10144004:
+        I2C::Write8(addr, data);
+        return;
     }
 
     printf("Write8 unknown addr 0x%08x\n", addr);
@@ -485,6 +509,11 @@ void Bus::ARM9::Write16(uint32_t addr, uint16_t data)
         return eMMC::Write16(addr, data);
     if (addr >= 0x10160000 && addr < 0x10161000)
         return;
+    if (addr >= 0x08000000 && addr < 0x08100000)
+    {
+        *(uint16_t*)&arm9_wram[addr & 0xFFFFF] = data;
+        return;
+    }
 
     switch (addr)
     {
@@ -555,6 +584,16 @@ void Bus::ARM9::Write32(uint32_t addr, uint32_t data)
         return PXI::WriteSend9(data);
     case 0x1000B000 ... 0x1000B900:
         return RSA::Write32(addr, data);
+    case 0x10012100:
+        otp_console_id &= ~0xFFFFFFFFF;
+        otp_console_id |= data;
+        return;
+    case 0x10012104:
+        otp_console_id &= 0xFFFFFFFFF;
+        otp_console_id |= ((uint64_t)data << 32);
+        return;
+    case 0x10000020:
+        return;
     }
 
     printf("[ARM9]: Write32 unknown addr 0x%08x\n", addr);

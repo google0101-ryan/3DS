@@ -41,7 +41,7 @@ uint8_t normal_ctr = 0, x_ctr, y_ctr;
 AES_ctx lib_aes_ctx;
 
 uint8_t keycnt = 0, keysel = 0;
-uint16_t block_count = 0;
+uint16_t block_count = 0, mac_count = 0;
 
 uint8_t temp_input_fifo[16];
 int temp_input_ctr;
@@ -168,6 +168,19 @@ void crypt_ctr()
     AES_CTR_xcrypt_buffer(&lib_aes_ctx, (uint8_t*)crypt_results, 16);
 }
 
+void decrypt_ecb()
+{
+    printf("[AES] Decrypt ECB\n");
+
+    for (int i = 0; i < 4; i++)
+    {
+        *(uint32_t*)&crypt_results[i * 4] = input_fifo.front();
+        input_fifo.pop();
+    }
+
+    AES_ECB_decrypt(&lib_aes_ctx, (uint8_t*)crypt_results);
+}
+
 void crypt_check()
 {
     if (input_fifo.size() >= 4 && output_fifo.size() <= 12 && aes_cnt.busy)
@@ -183,6 +196,9 @@ void crypt_check()
             break;
         case 0x5:
             encrypt_cbc();
+            break;
+        case 0x6:
+            decrypt_ecb();
             break;
         default:
             printf("[AES]: Unhandled mode %d\n", aes_cnt.mode);
@@ -224,7 +240,7 @@ void write_input_fifo(uint32_t value)
         for (int i = 0; i < 4; i++)
         {
             input_fifo.push(*(uint32_t*)&temp_input_fifo[i*4]);
-            printf("Input fifo 0x%08x\n", *(uint32_t*)&temp_input_fifo[i*4]);
+            printf("[AES]: Input fifo 0x%08x\n", *(uint32_t*)&temp_input_fifo[i*4]);
         }
     }
 
@@ -324,6 +340,25 @@ void gen_normal_key(int slot)
     memcpy(aes_keys[slot].normal, normal, 16);
 }
 
+void gen_dsi_key(int slot)
+{
+    uint8_t normal[16];
+    memcpy(normal, aes_keys[slot].x, 16);
+
+    for (int i = 0; i < 16; i++)
+        normal[i] ^= aes_keys[slot].y[i];
+    
+    n128_add((uint8_t*)normal, (uint8_t*)dsi_const);
+    n128_lrot((uint8_t*)normal, 42);
+
+    printf("[AES]: Generated DSi key is 0x");
+    for (int i = 0; i < 16; i++)
+        printf("%02x", normal[i]);
+    printf("\n");
+
+    memcpy(aes_keys[slot].normal, normal, 16);
+}
+
 void AES::Write32(uint32_t addr, uint32_t data)
 {
     if (addr == 0x10009100)
@@ -349,11 +384,46 @@ void AES::Write32(uint32_t addr, uint32_t data)
         return;
     }
 
+    if (addr >= 0x10009040 && addr < 0x10009100)
+    {
+        addr -= 0x10009040;
+        int key = (addr / 48) & 0x3;
+        int fifo_id = (addr / 16) % 3;
+        int offset = 3 - ((addr / 4) & 0x3);
+
+        switch (fifo_id)
+        {
+        case 0:
+            printf("[AES] Write to DSi KEY%d NORMAL: 0x%08x\n", key, data);
+            input_vector((uint8_t*)aes_keys[key].normal, offset, data, 4, true);
+            break;
+        case 1:
+            printf("[AES] Write to DSi KEY%d X: 0x%08x\n", key, data);
+            input_vector((uint8_t*)aes_keys[key].x, offset, data, 4, true);
+            break;
+        case 2:
+            printf("[AES] Write to DSi KEY%d Y: 0x%08x\n", key, data);
+            input_vector((uint8_t*)aes_keys[key].y, offset, data, 4, true);
+            gen_dsi_key(key);
+            break;
+        default:
+            printf("ERROR: Write to unknown DSi register 0x%08x (%d)\n", addr + 0x10009040, fifo_id);
+            exit(1);
+        }
+
+        return;
+    }
+
     switch (addr)
     {
     case 0x10009000:
         WriteAesCnt(data);
         break;
+    case 0x10009004:
+        mac_count = data & 0xffff;
+        block_count = (data >> 16);
+        printf("[AES] MAC count: $%08X\n", mac_count);
+        return;
     case 0x10009104:
         printf("[AES]: Write xfifo: 0x%08x\n", data);
         input_vector((uint8_t*)x_fifo, x_ctr, data, 4, false);

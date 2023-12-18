@@ -15,7 +15,7 @@ ARM9Core::ARM9Core()
 
 void ARM9Core::Reset()
 {
-    CanDisassemble = false;
+    CanDisassemble = true;
 
     memset(regs, 0, sizeof(regs));
     memset(regs_svc, 0, sizeof(regs_svc));
@@ -24,7 +24,7 @@ void ARM9Core::Reset()
     memset(regs_irq, 0, sizeof(regs_irq));
     memset(regs_und, 0, sizeof(regs_und));
 
-    regs[15] = 0xFFFF0000;
+    regs[15] = 0xFFFF0008;
 
     SwitchMode(MODE_SUPERVISOR);
 
@@ -32,8 +32,6 @@ void ARM9Core::Reset()
     cpsr.i = 1;
     cpsr.f = 1;
     cpsr.mode = MODE_SUPERVISOR;
-
-    FillPipeline();
 }
 
 void ARM9Core::Run()
@@ -51,7 +49,7 @@ void ARM9Core::Run()
     {   
         didBranch = false;
 
-        uint16_t instr = AdvancePipelineThumb();
+        uint16_t instr = Read16(*(registers[15]) - 4);
 
         if (CanDisassemble)
             printf("0x%04x (0x%08x) (t): ", *(registers[15]) - 4, instr);
@@ -62,24 +60,25 @@ void ARM9Core::Run()
     {   
         didBranch = false;
 
-        if (CanDisassemble)
-            printf("0x%08x ",  *(registers[15]) - 8);
+        uint32_t instr = Read32(*(registers[15]) - 8);
 
-        uint32_t instr = AdvancePipeline();
+        if (CanDisassemble)
+            printf("0x%08x (0x%08x)", instr,  *(registers[15]) - 8);
+        
         ARMGeneric::DoARMInstruction(this, instr);
     }
 
     if (cpsr.t)
     {
         if (didBranch)
-            FillPipelineThumb();
+			*(registers[15]) += 4;
         else
             *(registers[15]) += 2;
     }
     else
     {
         if (didBranch)
-            FillPipeline();
+			*(registers[15]) += 8;
         else
             *(registers[15]) += 4;
     }

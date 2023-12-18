@@ -4,15 +4,23 @@
 #include <string.h>
 #include <memory/Bus.h>
 
-std::ifstream file, *cur_transfer_drive;
+std::ifstream file, sdfile, *cur_transfer_drive;
+std::ofstream dump;
 
-uint32_t cid[4];
+uint32_t cid[4], sd_cid[4];
 
-uint32_t regcsd[4] = {0xe9964040, 0xdff7db7f, 0x2a0f5901, 0x3f269001};
-uint8_t regscr[8] = {0x00, 0x00, 0x00, 0x2a, 0x01, 0x00, 0x00, 0x00};
+uint32_t regcsd[4] = {0};
+uint8_t regscr[8] = {0};
+uint32_t ocr_reg = 0x80FF8080;
+
+uint16_t ctrl;
 
 void eMMC::Initialize(std::string fileName)
 {
+	sdfile.open("sd.bin", std::ios::binary | std::ios::in);
+
+	dump.open("nand_dump.bin");
+
     file.open(fileName, std::ios::binary);
     assert(file.is_open());
     file.seekg(0x200);
@@ -42,6 +50,20 @@ void eMMC::Initialize(std::string fileName)
         printf("[SDMMC]: Couldn't find NAND CID\n");
         exit(1);
     }
+
+	sd_cid[0] = 0xD71C65CD;
+    sd_cid[1] = 0x4445147B;
+    sd_cid[2] = 0x4D324731;
+    sd_cid[3] = 0x00150100;
+
+	regcsd[0] = 0xe9964040;
+	regcsd[1] = 0xdff7db7f;
+	regcsd[2] = 0x2a0f5901;
+	regcsd[3] = 0x3f269001;
+
+	memset(regscr, 0, 8);
+
+	*(uint32_t*)&regscr[1] = 0x012a0000;
 }
 
 struct SD_DATA32_IRQ
@@ -117,6 +139,7 @@ void command_end()
 void transfer_end()
 {
     transfer_buf = nullptr;
+	block_transfer = false;
     sd_data32_irq.rx32rdy_irq_flag = false;
     switch (state)
     {
@@ -124,6 +147,9 @@ void transfer_end()
     case RECEIVE:
         state = TRANSFER;
         break;
+	case TRANSFER:
+		state = STANDBY;
+		break;
     default:
         state = STANDBY;
         break;
@@ -141,6 +167,8 @@ uint16_t read_fifo()
         uint16_t value = *(uint16_t*)&transfer_buf[transfer_pos];
         transfer_pos += 2;
         transfer_size -= 2;
+
+		printf("[EMMC]: Read FIFO16: 0x%04x\n", value);
 
         if (!transfer_size)
         {
@@ -160,6 +188,10 @@ uint32_t eMMC::read_fifo32()
         transfer_pos += 4;
         transfer_size -= 4;
 
+		dump.write((char*)&value, 4);
+
+		printf("[EMMC]: Read FIFO32: 0x%08x\n", value);
+
         if (!transfer_size)
         {
             data_ready();
@@ -171,6 +203,7 @@ uint32_t eMMC::read_fifo32()
                     transfer_end();
                 else
                 {
+					printf("TODO: NDMA transfer\n");
                     transfer_size = data_blocklen;
                     cur_transfer_drive->read((char*)transfer_buf, transfer_size);
                 }
@@ -219,9 +252,10 @@ uint16_t eMMC::Read16(uint32_t addr)
         return 0;
     case 0x10006030:
         return read_fifo();
+    case 0x100060D8:
+		return ctrl;
     case 0x10006036:
     case 0x10006038:
-    case 0x100060D8:
     case 0x100060e0:
     case 0x100060f8:
     case 0x100060fa:
@@ -258,13 +292,15 @@ void DoCommand(uint8_t command)
 {
     if (acmd)
     {
+		irq_status &= ~1;
+
         switch (command)
         {
         case 6:
             printf("[SDMMC]: SET_BUS_WIDTH\n");
             *(uint32_t*)&regsd_status[60] = ((*(uint32_t*)&regsd_status[60] & ~3) << 30) | sd_cmd_param << 30;
             response[0] = get_r1_reply();
-            SetIstat(1);
+            command_end();
             break;
         case 13:
             printf("[SDMMC]: SD_STATUS\n");
@@ -276,19 +312,22 @@ void DoCommand(uint8_t command)
             transfer_size = sizeof(regsd_status);
             transfer_pos = 0;
             command_end();
-            data_ready();
+            // data_ready();
             break;
         case 41:
             printf("[SDMMC]: SD_SEND_OP_COND\n");
-            response[0] = 0x80FF8080;
-            SetIstat(1);
+			if (port == 1)
+	            response[0] = 0x80FF8080;
+			else
+				response[0] = 0x80FF8080 | (1 << 30);
+            command_end();
             if (state == EMMCState::IDLE)
                 state = EMMCState::READY;
             break;
         case 42:
             printf("[SDMMC]: SET_CLR_CARD_DETECT\n");
             response[0] = get_r1_reply();
-            irq_status |= 1;
+            command_end();
             break;
         case 51:
             printf("[SDMMC]: GET_SCR\n");
@@ -315,48 +354,70 @@ void DoCommand(uint8_t command)
         {
         case 0:
             printf("[SDMMC]: GO_TO_IDLE\n");
+			irq_status = 0;
+			response[0] = 1 << 9;
+			command_end();
             state = EMMCState::IDLE;
-            SetIstat(1);
+            break;
+        case 1:
+            printf("[SDMMC] SEND_OP_COND\n");
+            response[0] = ocr_reg;
+            command_end();
             break;
         case 2:
             printf("[SDMMC]: ALL_GET_CID\n");
-            memcpy(response, cid, 16);
-            SetIstat(1);
+			if (port == 1)
+	            memcpy(response, cid, 16);
+			else
+				memcpy(response, sd_cid, 16);
+            command_end();
             if (state == EMMCState::READY)
                 state = EMMCState::IDENTIFY;
             break;
         case 3:
             printf("[SDMMC]: SET_RELATIVE_ADDR\n");
             response[0] = 0x10000 | get_r1_reply();
+			command_end();
             if (state == EMMCState::IDENTIFY)
                 state = EMMCState::STANDBY;
-            SetIstat(1);
+            break;
+        case 6:
+            printf("[SDMMC]: SWITCH_FUNC\n");
+            response[0] = get_r1_reply();
+            command_end();
+
+            if (state == TRANSFER)
+                state = PROGRAM;
             break;
         case 7:
             printf("[SDMMC]: SELECT_DESELECT_CARD\n");
             response[0] = get_r1_reply();
-            SetIstat(1);
+            command_end();
             break;
         case 8:
             printf("[SDMMC]: GET_EXT_CSD\n");
             response[0] = 0x1AA;
-            SetIstat(1);
+            command_end();
             break;
         case 9:
             printf("[SDMMC]: GET_CSD\n");
             memcpy(response, regcsd, 16);
-            SetIstat(1);
+            command_end();
+            break;
+        case 10:
+            printf("[SDMMC]: GET_CID\n");
+            memcpy(response, cid, 16);
+            command_end();
             break;
         case 13:
             printf("[SDMMC]: GET_STATUS\n");
             response[0] = get_r1_reply();
-            SetIstat(1);
+            command_end();
             break;
         case 16:
-            printf("[SDMMC]: SET_BLOCKLEN\n");
-            response[0] = get_r1_reply();
             cmd_block_len = sd_cmd_param;
-            SetIstat(1);
+            printf("[SDMMC]: SET_BLOCKLEN (0x%08x)\n", sd_cmd_param);
+            command_end();
             break;
         case 18:
             transfer_start_addr = sd_cmd_param;
@@ -368,9 +429,15 @@ void DoCommand(uint8_t command)
             transfer_size = data_blocklen;
             block_transfer = true;
 
-            cur_transfer_drive = &file;
+			if (port == 1)
+	            cur_transfer_drive = &file;
+			else
+			{
+				cur_transfer_drive = &sdfile;
+				transfer_start_addr *= data_blocklen;
+			}
 
-            printf("[EMMC] Read multiple blocks (start: $%lX blocks: $%08X)\n", transfer_start_addr, data_blockcount);
+            printf("[EMMC] Read multiple blocks (%s) (start: $%lX blocks: $%08X)\n", (port == SD) ? "SD" : "NAND", transfer_start_addr, data_blockcount);
 
             if (cur_transfer_drive->eof())
                 cur_transfer_drive->clear();
@@ -385,7 +452,7 @@ void DoCommand(uint8_t command)
             printf("[SDMMC]: ACMD prefix\n");
             acmd = true;
             response[0] = get_r1_reply();
-            SetIstat(1);
+            command_end();
             break;
         default:
             printf("[SDMMC]: Unknown command %d\n", command);
@@ -405,10 +472,10 @@ void eMMC::Write16(uint32_t addr, uint16_t data)
         return;
     case 0x10006002:
         port = (PORT)(data & 1);
-        if (firstTime)
-            firstTime = false;
-        else
-            assert(port == EMMC);
+        // if (firstTime)
+        //     firstTime = false;
+        // else
+        //     assert(port == EMMC);
         printf("[SDMMC]: Selected port %d (%s)\n", (int)port, port == SD ? "sd" : "emmc");
         return;
     case 0x10006004:
@@ -452,8 +519,10 @@ void eMMC::Write16(uint32_t addr, uint16_t data)
         data_blocklen = data;
         printf("[SDMMC]: Write 0x%04x to SD_DATA16_BLKLEN\n", data);
         return;
-    case 0x10006028:
     case 0x100060D8:
+		ctrl = data;
+		return;
+    case 0x10006028:
     case 0x100060e0:
     case 0x100060f8:
     case 0x100060fc:
@@ -464,17 +533,10 @@ void eMMC::Write16(uint32_t addr, uint16_t data)
         sd_data32_irq.is32 = (data >> 1) & 1;
         sd_data32_irq.rx32rdy_irqen = (data >> 11) & 1;
         sd_data32_irq.tx32rq_irqen = (data >> 12) & 1;
-
-        if ((data >> 10) & 1)
-        {
-            std::queue<uint8_t> empty;
-            fifo32.swap(empty);
-        }
-
         return;
     }
     case 0x10006104:
-        data32_blocklen = data;
+        data32_blocklen = data & 0x3FF;
         printf("[SDMMC]: Write 0x%08x to blocklen\n", data);
         return;
     case 0x10006108:
