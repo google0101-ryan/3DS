@@ -160,6 +160,7 @@ private:
     static void MoveToCP(ARMCore* core, uint32_t instr);
     static void BlxOffset(ARMCore* core, uint32_t instr);
     static void Umull(ARMCore* core, uint32_t instr);
+    static void Smull(ARMCore* core, uint32_t instr);
     static void Umlal(ARMCore* core, uint32_t instr);
     static void Mla(ARMCore* core, uint32_t instr);
     static void Clz(ARMCore* core, uint32_t instr);

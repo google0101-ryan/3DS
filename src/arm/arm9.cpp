@@ -15,7 +15,7 @@ ARM9Core::ARM9Core()
 
 void ARM9Core::Reset()
 {
-    CanDisassemble = true;
+    CanDisassemble = false;
 
     memset(regs, 0, sizeof(regs));
     memset(regs_svc, 0, sizeof(regs_svc));
